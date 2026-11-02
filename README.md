@@ -61,7 +61,6 @@ auth.token = "your_secure_cluster_token"
 transport.tcpMux = true
 
 # Optional: enable Wire Protocol v2 with mandatory key agreement
-transport.wireProtocol = "v2"
 transport.requireKeyShare = true
 ```
 
@@ -193,7 +192,7 @@ transport.proxyProtocolMode = "per-packet"
 Secure control channels with ephemeral X25519 ECDH key agreement and hardware AEAD:
 
 ```toml
-# In both frps.toml and frpc.toml
+# In frpc.toml (wireProtocol); requireKeyShare on both
 [transport]
 wireProtocol = "v2"
 requireKeyShare = true

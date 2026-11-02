@@ -8,7 +8,7 @@ For the version compatibility policy that bounds these support windows, see the 
 
 ### Observability endpoints on `webServer`
 
-- **Deprecated since:** v0.72.0 (when `metricsServer` was added). This fork (v0.71.1-fork) ships `metricsServer` inherited from upstream; the v0.71.x baseline is no longer the last line without it.
+- **Deprecated since:** v0.71.1 (fork/upstream dev, when metricsServer was added). This fork (v0.71.1-fork) ships `metricsServer` inherited from upstream; the v0.71.x baseline is no longer the last line without it.
 - **Removal target:** v0.80.0 or later. v0.71.x is the last upstream line without `metricsServer` and is supported until v0.80.0 is released, so v0.79.x is the last release that must keep these endpoints.
 - **Replacement:** `metricsServer`. Point health probes at its `/healthz`, scrapes at its `/metrics` (frps exposes business metrics there without `enablePrometheus`), and use `metricsServer.pprofEnable` for profiling.
 - **Deprecated items:** `/healthz` on `webServer` in both frps and frpc; `/metrics` on the frps `webServer` and the top-level `enablePrometheus` that gates it; the pprof handlers on `webServer` and `webServer.pprofEnable` in both frps and frpc.

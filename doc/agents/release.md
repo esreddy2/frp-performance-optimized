@@ -1,6 +1,6 @@
 # Release Process
 
-> Note: `origin` is the upstream `fatedier/frp` remote and is fetch-only; push fork branches and tags to the `frp` remote (`git@github.com:esreddy2/frp.git`).
+> Note: `origin` is the upstream `fatedier/frp` remote and is fetch-only; push fork branches and tags to the `frp` remote (`git@github.com:esreddy2/frp-performance-optimized.git`).
 
 ## 1. Update Release Notes
 
@@ -32,7 +32,7 @@ Commit and push to `dev`:
 ```bash
 git add pkg/util/version/version.go Release.md
 git commit -m "bump version to vX.Y.Z"
-git push frp dev
+git push frp main
 ```
 
 ## 3. Pre-release Validation
@@ -84,7 +84,7 @@ compatibility window changes.
 Create a PR from `dev` to `master`:
 
 ```bash
-gh pr create --base master --head dev --title "bump version"
+gh pr create --base main --head dev --title "bump version"
 ```
 
 Wait for CI to pass, then merge using **merge commit** (not squash).
@@ -92,8 +92,8 @@ Wait for CI to pass, then merge using **merge commit** (not squash).
 ## 5. Tag the Release
 
 ```bash
-git checkout master
-git pull origin master
+git checkout main
+git pull frp main
 git tag -a vX.Y.Z -m "bump version"
 git push frp vX.Y.Z
 ```

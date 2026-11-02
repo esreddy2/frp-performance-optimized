@@ -56,7 +56,6 @@ bindPort = 7000
 auth.method = "token"
 auth.token = "your_secure_cluster_token"
 
-transport.wireProtocol = "v2"
 # Refuse clients that do not provide an X25519 key share
 transport.requireKeyShare = true
 ```

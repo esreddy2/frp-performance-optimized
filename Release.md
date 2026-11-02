@@ -57,7 +57,7 @@ This repository is a personal fork of [fatedier/frp](https://github.com/fatedier
 | Proxy | `quicDatagramStrict` | bool | `false` | Drops oversized datagrams instead of falling back to stream. |
 | Transport | `transport.wireProtocol` | string | `"v1"` | Wire protocol version (`"v1"` or `"v2"`). |
 | Transport | `transport.requireKeyShare` | bool | `false` | Enforces ephemeral X25519 key agreement on wire v2. |
-| Transport | `transport.tls.useSystemCa` | bool | `false` | Verifies server certificates using system root CAs (supported on all TLS transports). |
+| Transport | `transport.tls.useSystemCa` | bool | `false` | Verifies server certs using system root CAs (frpc transports only; web/metrics TLS excluded). |
 | Server | `metricsServer.port` | int | `0` | Dedicated listener for `/healthz`, `/metrics`, and pprof. |
 
 

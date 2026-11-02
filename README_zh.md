@@ -39,7 +39,7 @@
 * **网络超时抗抖动（Jitter-Immune Deadlines）：** 将原有的半窗口（$T/2$）保活超时刷新阈值修正为四分之一窗口（$3/4\,T$），从机制上消除因调度抖动或 Go GC 暂停导致的误断开。
 * **无阻塞 UDP 队列设计：** UDP/SUDP 读写工作通道采用 1024 包饱和丢弃缓冲队列，严格符合 RFC 768 UDP 协议语义；代理停止时同步关闭活动 UDP 连接，立即释放内核临时端口与读阻塞。
 * **两阶段服务端插件准入机制：** 新增 `NewProxyResult` 插件生命周期操作，配合不可变 128 位 `attempt_id` 事务关联；异步 `CloseProxy` 通知队列容量扩容至 2048，并引入指数退避重试与严格请求超时。
-* **代码级嵌入与系统 CA 支持：** 提供 `ServiceOptions.OnFirstLoginSuccess` 钩子用于在代理注册前对客户端会话进行鉴权校验；支持在所有 TLS 传输协议（包括 QUIC 和 WSS）中继承系统根证书库并与自定义 CA 结合；Unix 域套接字错误日志脱敏，防止泄露本地路径。
+* **代码级嵌入与系统 CA 支持：** 提供 `ServiceOptions.OnFirstLoginSuccess` 钩子用于在代理注册前对客户端会话进行鉴权校验；支持在 frpc 传输（含 QUIC/WSS）中使用 transport.tls.useSystemCa 继承系统根证书库并与自定义 CA 结合；Unix 域套接字错误日志脱敏，防止泄露本地路径。
 
 ---
 
@@ -61,7 +61,6 @@ auth.token = "your_secure_cluster_token"
 transport.tcpMux = true
 
 # 可选：启用 Wire Protocol v2 并强制密钥协商
-transport.wireProtocol = "v2"
 transport.requireKeyShare = true
 ```
 
@@ -101,7 +100,7 @@ remotePort = 6000
 
 ---
 
-## 企业级功能与配置示例
+## 增强特性与配置示例
 
 ### 1. Linux 透明代理与真实客户端 IP 保持 (`tproxy`)
 
@@ -193,7 +192,7 @@ transport.proxyProtocolMode = "per-packet"
 为控制信道提供现代密码学保护：
 
 ```toml
-# 同时在 frps.toml 与 frpc.toml 中配置
+# 仅在 frpc.toml 中配置 wireProtocol（requireKeyShare 双端）
 [transport]
 wireProtocol = "v2"
 requireKeyShare = true
