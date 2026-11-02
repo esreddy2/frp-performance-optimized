@@ -78,7 +78,7 @@ type ServerCommonConf struct {
 	// HTTP server, in seconds. By default, this value is 60.
 	VhostHTTPTimeout int64 `ini:"vhost_http_timeout" json:"vhost_http_timeout"`
 	// DashboardAddr specifies the address that the dashboard binds to. By
-	// default, this value is "0.0.0.0".
+	// default, this value is "127.0.0.1".
 	DashboardAddr string `ini:"dashboard_addr" json:"dashboard_addr"`
 	// DashboardPort specifies the port that the dashboard listens on. If this
 	// value is 0, the dashboard will not be started. By default, this value is
@@ -128,7 +128,7 @@ type ServerCommonConf struct {
 	// true. By default, this value is false.
 	DisableLogColor bool `ini:"disable_log_color" json:"disable_log_color"`
 	// DetailedErrorsToClient defines whether to send the specific error (with
-	// debug info) to frpc. By default, this value is true.
+	// debug info) to frpc. By default, this value is false.
 	DetailedErrorsToClient bool `ini:"detailed_errors_to_client" json:"detailed_errors_to_client"`
 
 	// SubDomainHost specifies the domain that will be attached to sub-domains
@@ -209,10 +209,10 @@ type ServerCommonConf struct {
 func GetDefaultServerConf() ServerCommonConf {
 	return ServerCommonConf{
 		ServerConfig:           legacyauth.GetDefaultServerConf(),
-		DashboardAddr:          "0.0.0.0",
+		DashboardAddr:          "127.0.0.1",
 		LogFile:                "console",
 		LogWay:                 "console",
-		DetailedErrorsToClient: true,
+		DetailedErrorsToClient: false,
 		TCPMux:                 true,
 		AllowPorts:             make(map[int]struct{}),
 		HTTPPlugins:            make(map[string]HTTPPluginOptions),

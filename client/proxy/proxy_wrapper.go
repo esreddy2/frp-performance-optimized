@@ -83,6 +83,7 @@ type Wrapper struct {
 	lastSendStartMsg time.Time
 	lastStartErr     time.Time
 	closeCh          chan struct{}
+	closeChClosed    bool
 	healthNotifyCh   chan struct{}
 	mu               sync.RWMutex
 
@@ -176,7 +177,10 @@ func (pw *Wrapper) Start() {
 func (pw *Wrapper) Stop() {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
-	close(pw.closeCh)
+	if !pw.closeChClosed {
+		close(pw.closeCh)
+		pw.closeChClosed = true
+	}
 	// The health notification channel is not closed. The callbacks of the
 	// health check send on it, and a send on a closed channel panics even
 	// when it is in a select with a default branch. Closing the channel

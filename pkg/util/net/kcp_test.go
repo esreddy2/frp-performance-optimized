@@ -61,32 +61,24 @@ func TestKCPListenerCloseCancelsPendingHandoff(t *testing.T) {
 	_, err = peer.Write([]byte("pending handoff"))
 	require.NoError(t, err)
 
-	var loopID string
+	// With a buffered handoff channel the pending connection is delivered
+	// to the accept queue instead of blocking the accept loop, so wait for
+	// that delivery before retiring the listener.
 	require.Eventually(t, func() bool {
-		for stack := range strings.SplitSeq(kcpGoroutineDump(t), "\n\n") {
-			if !strings.Contains(stack, "github.com/fatedier/frp/pkg/util/net.ListenKcp.func1()") ||
-				strings.Contains(stack, "github.com/xtaci/kcp-go/v5.(*Listener).AcceptKCP(") {
-				continue
-			}
-			header, _, _ := strings.Cut(stack, "\n")
-			if strings.Contains(header, "[select]") || strings.Contains(header, "[chan send]") {
-				loopID = strings.Fields(header)[1]
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, time.Millisecond, "accept loop did not reach the unconsumed handoff")
+		return len(l.acceptCh) > 0
+	}, 5*time.Second, time.Millisecond, "accept loop did not hand off the pending connection")
 	require.Equal(t, sessionsBefore+2, atomic.LoadUint64(&kcp.DefaultSnmp.CurrEstab))
 
 	require.NoError(t, l.Close())
 	require.Eventually(t, func() bool {
-		return !strings.Contains(kcpGoroutineDump(t), "goroutine "+loopID+" [")
-	}, 5*time.Second, time.Millisecond, "accept loop remained blocked after Close")
+		return !strings.Contains(kcpGoroutineDump(t), "github.com/fatedier/frp/pkg/util/net.ListenKcp.func1()")
+	}, 5*time.Second, time.Millisecond, "accept loop remained running after Close")
 
-	// kcp-go has no close frame. Its session counter decreases only when the
-	// session itself is closed; closing the listener socket is not sufficient.
-	// Keep the client open so this decrement must belong to the pending server session.
-	require.Equal(t, sessionsBefore+1, atomic.LoadUint64(&kcp.DefaultSnmp.CurrEstab))
+	// Close drains the buffered pending handoff, so the pending server
+	// session is released by Close itself.
+	require.Eventually(t, func() bool {
+		return atomic.LoadUint64(&kcp.DefaultSnmp.CurrEstab) == sessionsBefore+1
+	}, 5*time.Second, time.Millisecond, "pending server session was not released by Close")
 	require.NoError(t, peer.Close())
 	require.Equal(t, sessionsBefore, atomic.LoadUint64(&kcp.DefaultSnmp.CurrEstab))
 }

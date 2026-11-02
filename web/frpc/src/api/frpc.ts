@@ -20,7 +20,7 @@ export const putConfig = (content: string) => {
 }
 
 export const reloadConfig = () => {
-  return http.get<void>('/api/reload')
+  return http.post<void>('/api/reload')
 }
 
 // Config lookup API (any source)

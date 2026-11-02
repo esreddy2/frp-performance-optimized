@@ -52,15 +52,20 @@ func NewFakeUDPConn(l *UDPListener, laddr, raddr net.Addr) *FakeUDPConn {
 	}
 
 	go func() {
-		for {
-			time.Sleep(5 * time.Second)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
 			fc.mu.RLock()
-			if time.Since(fc.lastActive) > 10*time.Second {
-				fc.mu.RUnlock()
-				fc.Close()
-				break
-			}
+			closed := fc.closeFlag
+			idle := time.Since(fc.lastActive) > 10*time.Second
 			fc.mu.RUnlock()
+			if closed {
+				return
+			}
+			if idle {
+				fc.Close()
+				return
+			}
 		}
 	}()
 	return fc
@@ -114,10 +119,16 @@ func (c *FakeUDPConn) Write(b []byte) (n int, err error) {
 
 func (c *FakeUDPConn) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if !c.closeFlag {
 		c.closeFlag = true
 		close(c.packets)
+	}
+	c.mu.Unlock()
+
+	if c.l != nil {
+		c.l.mu.Lock()
+		delete(c.l.fakeConns, c.remoteAddr.String())
+		c.l.mu.Unlock()
 	}
 	return nil
 }
@@ -154,6 +165,7 @@ type UDPListener struct {
 	writeCh   chan *UDPPacket
 	readConn  net.Conn
 	closeFlag bool
+	mu        sync.Mutex
 
 	fakeConns map[string]*FakeUDPConn
 }
@@ -187,14 +199,19 @@ func ListenUDP(bindAddr string, bindPort int) (l *UDPListener, err error) {
 				return
 			}
 
+			l.mu.Lock()
 			fakeConn, exist := l.fakeConns[remoteAddr.String()]
 			if !exist || fakeConn.IsClosed() {
 				fakeConn = NewFakeUDPConn(l, l.Addr(), remoteAddr)
 				l.fakeConns[remoteAddr.String()] = fakeConn
 			}
+			l.mu.Unlock()
 			fakeConn.putPacket(buf[:n])
 
-			l.acceptCh <- fakeConn
+			select {
+			case l.acceptCh <- fakeConn:
+			default:
+			}
 		}
 	}()
 
@@ -244,11 +261,25 @@ func (l *UDPListener) Accept() (net.Conn, error) {
 }
 
 func (l *UDPListener) Close() error {
-	if !l.closeFlag {
-		l.closeFlag = true
-		if l.readConn != nil {
-			l.readConn.Close()
-		}
+	l.mu.Lock()
+	if l.closeFlag {
+		l.mu.Unlock()
+		return nil
+	}
+	l.closeFlag = true
+	conns := make([]*FakeUDPConn, 0, len(l.fakeConns))
+	for _, fc := range l.fakeConns {
+		conns = append(conns, fc)
+	}
+	l.fakeConns = make(map[string]*FakeUDPConn)
+	readConn := l.readConn
+	l.mu.Unlock()
+
+	for _, fc := range conns {
+		_ = fc.Close()
+	}
+	if readConn != nil {
+		readConn.Close()
 	}
 	return nil
 }

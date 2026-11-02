@@ -11,6 +11,7 @@
         <a
           href="https://github.com/fatedier/frp#configuration-files"
           target="_blank"
+          rel="noopener noreferrer"
           class="docs-link"
         >
           <el-icon><Link /></el-icon>

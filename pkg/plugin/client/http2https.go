@@ -43,7 +43,7 @@ func NewHTTP2HTTPSPlugin(_ PluginContext, options v1.ClientPluginOptions) (Plugi
 
 	tr := &http.Transport{
 		// Intentional: bridges to a local HTTPS backend that commonly uses a self-signed certificate, with no CA option.
-		// lgtm[go/disabled-certificate-check]
+		// lgtm[go/disabled-certificate-check] (AUD-043: intentional self-signed local backend)
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 

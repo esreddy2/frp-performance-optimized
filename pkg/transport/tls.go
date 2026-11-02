@@ -194,6 +194,10 @@ func newClientTLSConfig(
 	default:
 		// frp's default TLS uses self-signed certificates and no trust store;
 		// verification is enabled whenever a CA or system pool is configured.
+		// Tradeoff: skipping verification by default keeps out-of-the-box
+		// deployments working with frp's generated self-signed certs, but it
+		// does not protect against MITM. Configure tls.trustedCaFile (or
+		// tls.useSystemCa) to enable verification. Kept intentional (AUD-015).
 		// lgtm[go/disabled-certificate-check]
 		base.InsecureSkipVerify = true
 	}

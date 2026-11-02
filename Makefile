@@ -2,6 +2,8 @@ export PATH := $(PATH):`go env GOPATH`/bin
 export GO111MODULE=on
 LDFLAGS := -s -w
 NOWEB_TAG = $(shell [ ! -d web/frps/dist ] || [ ! -d web/frpc/dist ] && echo ',noweb')
+FRPS_NOWEB_TAG = $(shell [ ! -d web/frps/dist ] && echo ',noweb')
+FRPC_NOWEB_TAG = $(shell [ ! -d web/frpc/dist ] && echo ',noweb')
 FRP_COMPAT_BASELINE_COUNT ?= 8
 FRP_COMPAT_FLOOR_VERSION ?= 0.61.0
 
@@ -38,10 +40,10 @@ vet:
 	go vet -tags "$(NOWEB_TAG)" ./...
 
 frps:
-	env CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -tags "frps$(NOWEB_TAG)" -o bin/frps ./cmd/frps
+	env CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -tags "frps$(FRPS_NOWEB_TAG)" -o bin/frps ./cmd/frps
 
 frpc:
-	env CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -tags "frpc$(NOWEB_TAG)" -o bin/frpc ./cmd/frpc
+	env CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -tags "frpc$(FRPC_NOWEB_TAG)" -o bin/frpc ./cmd/frpc
 
 test: gotest
 

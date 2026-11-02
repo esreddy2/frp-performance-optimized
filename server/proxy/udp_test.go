@@ -387,11 +387,19 @@ func TestUDPProxyCloseLeavesTheFlowChannelsOpen(t *testing.T) {
 	_, err := pxy.Run()
 	require.NoError(err)
 
-	// A sender that fills the channel of the flow and blocks on the next
-	// send, like the work connection reader of a busy proxy does.
+	// Fill the flow channel to capacity up front, so the sender is blocked
+	// on its first send when the proxy is closed.
+	for i := 0; i < cap(pxy.readCh); i++ {
+		pxy.readCh <- &msg.UDPPacket{Content: []byte("payload")}
+	}
+
+	// A sender that blocks on the next send, because the channel of the
+	// flow is already full.
 	senderStopped := make(chan struct{})
 	senderPanic := make(chan any, 1)
+	senderStarted := make(chan struct{})
 	go func() {
+		close(senderStarted)
 		defer func() {
 			if r := recover(); r != nil {
 				senderPanic <- r
@@ -405,11 +413,7 @@ func TestUDPProxyCloseLeavesTheFlowChannelsOpen(t *testing.T) {
 			}
 		}
 	}()
-	// Wait until the channel of the flow is full, so that the sender is
-	// blocked in a send when the proxy is closed.
-	for len(pxy.readCh) < cap(pxy.readCh) {
-		time.Sleep(time.Millisecond)
-	}
+	<-senderStarted
 
 	pxy.Close()
 	close(senderStopped)

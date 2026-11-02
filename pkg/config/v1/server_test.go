@@ -29,7 +29,7 @@ func TestServerConfigComplete(t *testing.T) {
 
 	require.EqualValues("token", c.Auth.Method)
 	require.Equal(true, lo.FromPtr(c.Transport.TCPMux))
-	require.Equal(true, lo.FromPtr(c.DetailedErrorsToClient))
+	require.Equal(false, lo.FromPtr(c.DetailedErrorsToClient))
 }
 
 func TestAuthServerConfig_Complete(t *testing.T) {

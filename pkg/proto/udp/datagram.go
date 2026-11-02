@@ -155,6 +155,9 @@ func DatagramMuxFor(qc *quic.Conn) *DatagramMux {
 	if qc == nil {
 		return nil
 	}
+	if err := qc.Context().Err(); err != nil {
+		return nil
+	}
 	dgramMusMu.Lock()
 	defer dgramMusMu.Unlock()
 	if m, ok := dgramMuxes[qc]; ok {

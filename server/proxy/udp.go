@@ -236,6 +236,11 @@ func (pxy *UDPProxy) runWithStreams(xl *xlog.Logger, udpConn *net.UDPConn) {
 	// send message to workConn; when dgMux is set, packets go out as
 	// unreliable QUIC datagrams and only oversized ones use the stream
 	workConnSenderFn := func(payloadConn *msg.Conn, dgMux *udp.DatagramMux, ctx context.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				xl.Infof("sender goroutine for udp work connection closed: %v", r)
+			}
+		}()
 		var errRet error
 		for {
 			select {

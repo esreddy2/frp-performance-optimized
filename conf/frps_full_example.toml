@@ -53,10 +53,6 @@ transport.tls.force = false
 # transport.tls.keyFile = "server.key"
 # transport.tls.trustedCaFile = "ca.crt"
 
-# Wire protocol version for frps control communication.
-# supports v1 and v2, default is v1. v2 enables X25519 key agreement and AEAD framing.
-# transport.wireProtocol = "v1"
-
 # with wireProtocol v2, refuse clients that do not perform the X25519 key exchange, default is false.
 # transport.requireKeyShare = false
 
@@ -82,7 +78,7 @@ vhostHTTPSPort = 443
 webServer.addr = "127.0.0.1"
 webServer.port = 7500
 webServer.user = "admin"
-webServer.password = "admin"
+webServer.password = "change-me"
 # webServer.tls.certFile = "server.crt"
 # webServer.tls.keyFile = "server.key"
 # dashboard assets directory(only for debug mode)
@@ -95,7 +91,7 @@ webServer.pprofEnable = false
 
 # Deprecated: enablePrometheus exports /metrics on webServer only.
 # Use metricsServer.port instead; it enables business metrics automatically.
-enablePrometheus = true
+# enablePrometheus = true
 
 # Separate health, Prometheus metrics, and optional profiling listener.
 # Port 0 disables it. The default address only accepts local connections.
@@ -117,8 +113,8 @@ log.maxDays = 3
 # disable log colors when log.to is console, default is false
 log.disablePrintColor = false
 
-# DetailedErrorsToClient defines whether to send the specific error (with debug info) to frpc. By default, this value is true.
-detailedErrorsToClient = true
+# DetailedErrorsToClient defines whether to send the specific error (with debug info) to frpc. By default, this value is false.
+detailedErrorsToClient = false
 
 # auth.method specifies what authentication method to use authenticate frpc with frps.
 # If "token" is specified - token will be read into login message.

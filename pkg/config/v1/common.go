@@ -160,7 +160,11 @@ type HTTPPluginOptions struct {
 	Addr      string   `json:"addr"`
 	Path      string   `json:"path"`
 	Ops       []string `json:"ops"`
-	TLSVerify bool     `json:"tlsVerify,omitempty"`
+	TLSVerify *bool    `json:"tlsVerify,omitempty"`
+}
+
+func (o *HTTPPluginOptions) Complete() {
+	o.TLSVerify = util.EmptyOr(o.TLSVerify, new(true))
 }
 
 type HeaderOperations struct {

@@ -315,6 +315,11 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 		readUDPWorkConn(rw, readCh, xl)
 	}
 	workConnSenderFn := func(rw msg.ReadWriter, sendCh chan msg.Message) {
+		defer func() {
+			if r := recover(); r != nil {
+				xl.Infof("sender goroutine for udp work connection closed: %v", r)
+			}
+		}()
 		defer cancel()
 		var errRet error
 		for {

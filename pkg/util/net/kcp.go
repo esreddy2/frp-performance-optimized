@@ -42,7 +42,7 @@ func ListenKcp(address string) (l *KCPListener, err error) {
 
 	l = &KCPListener{
 		listener: listener,
-		acceptCh: make(chan net.Conn),
+		acceptCh: make(chan net.Conn, 128),
 		done:     make(chan struct{}),
 	}
 
@@ -64,13 +64,19 @@ func ListenKcp(address string) (l *KCPListener, err error) {
 			conn.SetWindowSize(1024, 1024)
 			conn.SetACKNoDelay(false)
 
-			select {
-			case <-l.done:
+			handoff := func() bool {
+				defer func() { _ = recover() }()
+				select {
+				case <-l.done:
+					return false
+				case l.acceptCh <- conn:
+					return true
+				default:
+					return false
+				}
+			}
+			if !handoff() {
 				conn.Close()
-				return
-			case l.acceptCh <- conn:
-				// A ready handoff may win when Close races with it. Once delivered,
-				// the connection is owned by the caller of Accept.
 			}
 		}
 	}()
@@ -86,7 +92,10 @@ func (l *KCPListener) Accept() (net.Conn, error) {
 	select {
 	case <-l.done:
 		return nil, ErrKCPListenerClosed
-	case conn := <-l.acceptCh:
+	case conn, ok := <-l.acceptCh:
+		if !ok {
+			return nil, ErrKCPListenerClosed
+		}
 		return conn, nil
 	}
 }
@@ -95,6 +104,16 @@ func (l *KCPListener) Close() error {
 	l.closeOnce.Do(func() {
 		close(l.done)
 		l.listener.Close()
+		// Drain any connections already buffered but not yet accepted so
+		// they are torn down instead of leaking until their deadline.
+		for {
+			select {
+			case conn := <-l.acceptCh:
+				_ = conn.Close()
+			default:
+				return
+			}
+		}
 	})
 	return nil
 }

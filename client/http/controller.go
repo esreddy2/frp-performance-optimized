@@ -67,7 +67,7 @@ func (c *Controller) toHTTPError(err error) error {
 	return httppkg.NewError(code, err.Error())
 }
 
-// Reload handles GET /api/reload
+// Reload handles POST /api/reload
 func (c *Controller) Reload(ctx *httppkg.Context) (any, error) {
 	strictConfigMode := false
 	strictStr := ctx.Query("strictConfig")

@@ -138,7 +138,7 @@ func (v *Muxer) Listen(ctx context.Context, cfg *RouteConfig) (l *Listener, err 
 		username:        cfg.Username,
 		password:        cfg.Password,
 		mux:             v,
-		accept:          make(chan net.Conn),
+		accept:          make(chan net.Conn, 128),
 		ctx:             ctx,
 	}
 	err = v.registryRouter.Add(cfg.Domain, cfg.Location, cfg.RouteByHTTPUser, l)
@@ -216,12 +216,22 @@ func (v *Muxer) handle(c net.Conn) {
 	c = sConn
 
 	xl.Debugf("new request host [%s] path [%s] httpUser [%s]", name, path, httpUser)
+	dropped := false
 	err = errors.PanicToError(func() {
-		l.accept <- c
+		select {
+		case l.accept <- c:
+		default:
+			dropped = true
+		}
 	})
 	if err != nil {
 		xl.Warnf("listener is already closed, ignore this request")
 		_ = c.Close()
+		return
+	}
+	if dropped {
+		_ = c.Close()
+		return
 	}
 }
 
@@ -264,6 +274,10 @@ func (l *Listener) Close() error {
 	l.closeOnce.Do(func() {
 		l.mux.registryRouter.Del(l.name, l.location, l.routeByHTTPUser)
 		close(l.accept)
+		// Drain any connections already buffered but not yet accepted.
+		for c := range l.accept {
+			_ = c.Close()
+		}
 	})
 	return nil
 }

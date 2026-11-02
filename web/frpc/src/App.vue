@@ -19,6 +19,7 @@
             class="github-link"
             href="https://github.com/fatedier/frp"
             target="_blank"
+            rel="noopener noreferrer"
             aria-label="GitHub"
           >
             <GitHubIcon class="github-icon" />

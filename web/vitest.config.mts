@@ -32,7 +32,10 @@ export default defineConfig({
             deps: { inline: ['element-plus', '@element-plus/icons-vue'] },
           },
           setupFiles: ['../test/setup.ts'],
-          include: ['test/**/*.test.ts'],
+          include: [
+            'test/**/*.test.ts',
+            '../shared/**/*.test.ts',
+          ],
         },
       },
     ],

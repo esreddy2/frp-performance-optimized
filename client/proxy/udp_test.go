@@ -859,8 +859,17 @@ func TestUDPProxyRetirementDoesNotRaceWithTheReader(t *testing.T) {
 
 	// The proxy is retired while the reader of the work connection is
 	// still running.
+	readCh := pxy.readCh
 	pxy.Close()
-	time.Sleep(100 * time.Millisecond)
+
+	// The flow channel is not closed on retirement, so a late packet from
+	// the work connection reader does not panic.
+	require.NotPanics(func() {
+		select {
+		case readCh <- &msg.UDPPacket{Content: []byte("late")}:
+		default:
+		}
+	})
 }
 
 // startRecordingService starts a udp service that records every packet it

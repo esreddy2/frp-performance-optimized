@@ -42,7 +42,7 @@ type ClientCommonConfig struct {
 	ClientID string `json:"clientID,omitempty"`
 
 	// ServerAddr specifies the address of the server to connect to. By
-	// default, this value is "0.0.0.0".
+	// default, this value is "127.0.0.1".
 	ServerAddr string `json:"serverAddr,omitempty"`
 	// ServerPort specifies the port to connect to the server on. By default,
 	// this value is 7000.
@@ -85,7 +85,7 @@ type ClientCommonConfig struct {
 }
 
 func (c *ClientCommonConfig) Complete() error {
-	c.ServerAddr = util.EmptyOr(c.ServerAddr, "0.0.0.0")
+	c.ServerAddr = util.EmptyOr(c.ServerAddr, "127.0.0.1")
 	c.ServerPort = util.EmptyOr(c.ServerPort, 7000)
 	c.LoginFailExit = util.EmptyOr(c.LoginFailExit, new(true))
 	c.NatHoleSTUNServer = util.EmptyOr(c.NatHoleSTUNServer, "stun.easyvoip.com:3478")

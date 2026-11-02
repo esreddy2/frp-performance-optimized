@@ -311,7 +311,10 @@ var _ = ginkgo.Describe("[Feature: Basic]", func() {
 				case "xtcp":
 					localPortName = framework.TCPEchoServerPort
 					protocol = "tcp"
-					ginkgo.Skip("stun server is not stable")
+					// xtcp depends on an external STUN server whose
+					// availability is not under our control, so this
+					// scenario is skipped in CI.
+					ginkgo.Skip("xtcp requires an external STUN server that is not stable in CI")
 				}
 
 				correctSK := "abc"

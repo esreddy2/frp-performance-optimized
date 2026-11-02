@@ -16,6 +16,7 @@ package validation
 
 import (
 	"fmt"
+	"net/url"
 	"slices"
 	"time"
 
@@ -38,6 +39,14 @@ func (v *ConfigValidator) ValidateServerConfig(c *v1.ServerConfig) (Warning, err
 	}
 
 	errs = AppendError(errs, v.validateAuthTokenSource(c.Auth.Token, c.Auth.TokenSource))
+
+	if c.Auth.Method == v1.AuthMethodOIDC {
+		if c.Auth.OIDC.Issuer == "" {
+			errs = AppendError(errs, fmt.Errorf("auth.oidc.issuer is required when auth.method is oidc"))
+		} else if u, err := url.Parse(c.Auth.OIDC.Issuer); err != nil || !u.IsAbs() || u.Host == "" {
+			errs = AppendError(errs, fmt.Errorf("auth.oidc.issuer must be an absolute URL"))
+		}
+	}
 
 	if err := validateLogConfig(&c.Log); err != nil {
 		errs = AppendError(errs, err)

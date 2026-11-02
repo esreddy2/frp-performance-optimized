@@ -162,7 +162,7 @@ func Convert_ServerCommonConf_To_v1(conf *ServerCommonConf) *v1.ServerConfig {
 			Addr:      v.Addr,
 			Path:      v.Path,
 			Ops:       v.Ops,
-			TLSVerify: v.TLSVerify,
+			TLSVerify: new(v.TLSVerify),
 		})
 	}
 

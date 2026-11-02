@@ -105,4 +105,4 @@ jobs:
     - name: Build frps and frpc binaries
       run: make frps frpc
     - name: End-to-end compatibility tests
-      run: make e2e-compatibility-smoke
+      run: make e2e-compatibility

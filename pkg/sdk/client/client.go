@@ -80,7 +80,7 @@ func (c *Client) Reload(ctx context.Context, strictMode bool) error {
 	if len(v) > 0 {
 		queryStr = "?" + v.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+c.address+"/api/reload"+queryStr, nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+c.address+"/api/reload"+queryStr, nil)
 	if err != nil {
 		return err
 	}

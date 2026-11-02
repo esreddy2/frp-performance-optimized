@@ -109,19 +109,28 @@ func BuildServerAuth(cfg *v1.AuthServerConfig) (*ServerAuth, error) {
 		}
 		resolved.Token = token
 	}
+	verifier, err := NewAuthVerifier(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build auth verifier: %w", err)
+	}
 	return &ServerAuth{
-		Verifier: NewAuthVerifier(resolved),
+		Verifier: verifier,
 		key:      []byte(resolved.Token),
 	}, nil
 }
 
-func NewAuthVerifier(cfg v1.AuthServerConfig) (authVerifier Verifier) {
+func NewAuthVerifier(cfg v1.AuthServerConfig) (authVerifier Verifier, err error) {
 	switch cfg.Method {
 	case v1.AuthMethodToken:
 		authVerifier = NewTokenAuth(cfg.AdditionalScopes, cfg.Token)
 	case v1.AuthMethodOIDC:
-		tokenVerifier := NewTokenVerifier(cfg.OIDC)
+		tokenVerifier, err := NewTokenVerifier(cfg.OIDC)
+		if err != nil {
+			return nil, err
+		}
 		authVerifier = NewOidcAuthVerifier(cfg.AdditionalScopes, tokenVerifier)
+	default:
+		return nil, fmt.Errorf("unsupported auth method: %s", cfg.Method)
 	}
-	return authVerifier
+	return authVerifier, nil
 }

@@ -273,10 +273,10 @@ type OidcAuthConsumer struct {
 	subjectsFromLogin map[string]struct{}
 }
 
-func NewTokenVerifier(cfg v1.AuthOIDCServerConfig) TokenVerifier {
+func NewTokenVerifier(cfg v1.AuthOIDCServerConfig) (TokenVerifier, error) {
 	provider, err := oidc.NewProvider(context.Background(), cfg.Issuer)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	verifierConf := oidc.Config{
 		ClientID:          cfg.Audience,
@@ -284,7 +284,7 @@ func NewTokenVerifier(cfg v1.AuthOIDCServerConfig) TokenVerifier {
 		SkipExpiryCheck:   cfg.SkipExpiryCheck,
 		SkipIssuerCheck:   cfg.SkipIssuerCheck,
 	}
-	return provider.Verifier(&verifierConf)
+	return provider.Verifier(&verifierConf), nil
 }
 
 func NewOidcAuthVerifier(additionalAuthScopes []v1.AuthScope, verifier TokenVerifier) *OidcAuthConsumer {

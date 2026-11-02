@@ -126,5 +126,8 @@ func (vm *Manager) CloseListener(name string) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
+	if l, ok := vm.listeners[name]; ok && l != nil && l.l != nil {
+		_ = l.l.Close()
+	}
 	delete(vm.listeners, name)
 }

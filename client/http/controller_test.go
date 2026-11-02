@@ -257,7 +257,7 @@ func TestReloadErrorMapping(t *testing.T) {
 			controller := &Controller{
 				manager: &fakeConfigManager{reloadFromFileFn: func(bool) error { return tc.err }},
 			}
-			ctx := httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/reload", nil))
+			ctx := httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/reload", nil))
 			_, err := controller.Reload(ctx)
 			if err == nil {
 				t.Fatal("expected error")

@@ -80,7 +80,7 @@ type ServerConfig struct {
 	Transport ServerTransportConfig `json:"transport,omitempty"`
 
 	// DetailedErrorsToClient defines whether to send the specific error (with
-	// debug info) to frpc. By default, this value is true.
+	// debug info) to frpc. By default, this value is false.
 	DetailedErrorsToClient *bool `json:"detailedErrorsToClient,omitempty"`
 	// MaxPortsPerClient specifies the maximum number of ports a single client
 	// may proxy to. If this value is 0, no limit will be applied.
@@ -116,14 +116,17 @@ func (c *ServerConfig) Complete() error {
 	}
 
 	if c.WebServer.Port > 0 {
-		c.WebServer.Addr = util.EmptyOr(c.WebServer.Addr, "0.0.0.0")
+		c.WebServer.Addr = util.EmptyOr(c.WebServer.Addr, "127.0.0.1")
 	}
 
 	c.VhostHTTPTimeout = util.EmptyOr(c.VhostHTTPTimeout, 60)
-	c.DetailedErrorsToClient = util.EmptyOr(c.DetailedErrorsToClient, new(true))
+	c.DetailedErrorsToClient = util.EmptyOr(c.DetailedErrorsToClient, new(false))
 	c.UserConnTimeout = util.EmptyOr(c.UserConnTimeout, 10)
 	c.UDPPacketSize = util.EmptyOr(c.UDPPacketSize, 1500)
 	c.NatHoleAnalysisDataReserveHours = util.EmptyOr(c.NatHoleAnalysisDataReserveHours, 7*24)
+	for i := range c.HTTPPlugins {
+		c.HTTPPlugins[i].Complete()
+	}
 	return nil
 }
 

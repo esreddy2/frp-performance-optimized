@@ -45,6 +45,10 @@ func (authMid *HTTPAuthMiddleware) SetAuthFailDelay(delay time.Duration) *HTTPAu
 func (authMid *HTTPAuthMiddleware) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqUser, reqPasswd, hasAuth := r.BasicAuth()
+		// Anonymous mode: when no credentials are configured, all requests are
+		// allowed without authentication. This is intentional for deployments
+		// that rely on network-level protection; set user/passwd to enforce
+		// basic auth. (AUD-016)
 		if (authMid.user == "" && authMid.passwd == "") ||
 			(hasAuth && util.ConstantTimeEqString(reqUser, authMid.user) &&
 				util.ConstantTimeEqString(reqPasswd, authMid.passwd)) {

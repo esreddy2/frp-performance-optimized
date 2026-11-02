@@ -42,7 +42,7 @@ func NewHTTPS2HTTPSPlugin(_ PluginContext, options v1.ClientPluginOptions) (Plug
 	}
 
 	tr := &http.Transport{
-		// lgtm[go/disabled-certificate-check]
+		// lgtm[go/disabled-certificate-check] (AUD-043: intentional self-signed local backend)
 		// InsecureSkipVerify is intentional: the HTTPS2HTTPS plugin proxies to a local self-signed HTTPS backend.
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}

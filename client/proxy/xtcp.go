@@ -180,7 +180,14 @@ func (pxy *XTCPProxy) listenByKCP(listenConn *net.UDPConn, raddr *net.UDPAddr, s
 
 func (pxy *XTCPProxy) listenByQUIC(listenConn *net.UDPConn, _ *net.UDPAddr, startWorkConnMsg *msg.StartWorkConn) {
 	xl := pxy.xl
-	defer listenConn.Close()
+	var quicListener *quic.Listener
+	defer func() {
+		if quicListener != nil {
+			_ = quicListener.Close()
+		} else if listenConn != nil {
+			_ = listenConn.Close()
+		}
+	}()
 
 	tlsConfig, err := transport.NewServerTLSConfig("", "", "")
 	if err != nil {
@@ -198,7 +205,7 @@ func (pxy *XTCPProxy) listenByQUIC(listenConn *net.UDPConn, _ *net.UDPAddr, star
 		// data. See the QUIC listener in server/service.go.
 		Allow0RTT: false,
 	}
-	quicListener, err := quic.Listen(listenConn, tlsConfig, quicConfig)
+	quicListener, err = quic.Listen(listenConn, tlsConfig, quicConfig)
 	if err != nil {
 		xl.Warnf("dial quic error: %v", err)
 		return

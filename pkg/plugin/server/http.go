@@ -78,8 +78,12 @@ func newHTTPPluginWithTimeout(options v1.HTTPPluginOptions, timeout time.Duratio
 
 	var client *http.Client
 	if strings.HasPrefix(url, "https://") {
+		tlsVerify := true
+		if options.TLSVerify != nil {
+			tlsVerify = *options.TLSVerify
+		}
 		tr := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: !options.TLSVerify},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: !tlsVerify},
 		}
 		client = &http.Client{Transport: tr, Timeout: timeout}
 	} else {
