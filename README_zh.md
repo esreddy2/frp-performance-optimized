@@ -165,6 +165,7 @@ remotePort = 51820
 quicDatagrams = true
 quicDatagramStrict = true
 ```
+注意：服务端必须设置 `quicBindPort`（详见 `doc/quic_datagrams.md`），QUIC 才可用。
 详细指南请参阅 [QUIC 数据报中继文档 (doc/quic_datagrams.md)](doc/quic_datagrams.md)。
 
 ---

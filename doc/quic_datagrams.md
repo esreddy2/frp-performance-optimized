@@ -79,7 +79,7 @@ QUIC datagram relay requires both QUIC transport on the client-server connection
 - **Transport:** Set `transport.protocol = "quic"` in `frpc.toml`.
 - **Server:** Set `quicBindPort` in `frps.toml` to the UDP port the client connects to. QUIC is disabled without it.
 - **Proxy:** Set `quicDatagrams = true` on each UDP proxy. If omitted (or set to `false`), the proxy continues using reliable QUIC streams.
-- **Constraints:** Because datagram forwarding bypasses stream-level framing, `quicDatagrams = true` cannot be combined with `transport.useEncryption` or `transport.useCompression` on the same proxy.
+- **Constraints:** Because datagram forwarding bypasses stream-level framing, the datagram lane is disabled at runtime when `transport.useEncryption` or `transport.useCompression` is set (no validation rejects the combination).
 
 ### Client Configuration (`frpc.toml`)
 

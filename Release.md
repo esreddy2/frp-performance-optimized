@@ -29,7 +29,7 @@ This repository is a personal fork of [fatedier/frp](https://github.com/fatedier
 
 ### Programmatic Embedding & System CA Support
 - **Client Authentication Hooks:** Embedders of `client.NewService` can configure `ServiceOptions.OnFirstLoginSuccess` to inspect and veto authenticated sessions before proxies are registered, and supply `InitialRunID` to resume sessions.
-- **System Root CAs on All Transports:** `transport.tls.useSystemCa` is now respected across all TLS transports, including implicit TLS transports (`quic` and `wss`), with support for combining system roots with custom `trustedCaFile`.
+- **System Root CAs on frpc Transports:** `transport.tls.useSystemCa` is now respected on frpc transports, including implicit TLS transports (`quic` and `wss`), with support for combining system roots with custom `trustedCaFile` (web/metrics server TLS excluded).
 - **Unix Domain Socket Privacy:** Dial failure logs report sanitized OS error codes without leaking private Unix socket filesystem paths.
 
 ---

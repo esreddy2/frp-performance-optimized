@@ -1,5 +1,7 @@
 # Release Process
 
+> Note: `origin` is the upstream `fatedier/frp` remote and is fetch-only; push fork branches and tags to the `frp` remote (`git@github.com:esreddy2/frp.git`).
+
 ## 1. Update Release Notes
 
 Edit `Release.md` in the project root with the changes for this version:
@@ -30,7 +32,7 @@ Commit and push to `dev`:
 ```bash
 git add pkg/util/version/version.go Release.md
 git commit -m "bump version to vX.Y.Z"
-git push origin dev
+git push frp dev
 ```
 
 ## 3. Pre-release Validation
@@ -93,7 +95,7 @@ Wait for CI to pass, then merge using **merge commit** (not squash).
 git checkout master
 git pull origin master
 git tag -a vX.Y.Z -m "bump version"
-git push origin vX.Y.Z
+git push frp vX.Y.Z
 ```
 
 ## 6. Trigger GoReleaser

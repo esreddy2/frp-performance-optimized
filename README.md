@@ -39,7 +39,7 @@ This repository is a personal fork of [fatedier/frp](https://github.com/fatedier
 * **Jitter-Immune Network Deadlines:** Quarter-window `IdleReadDeadline` refresh mathematically eliminates spurious connection drops caused by timer jitter or Go GC pauses under continuous traffic.
 * **Non-Blocking UDP Pipelines:** Worker queues utilize 1024-packet drop-on-saturation buffers adhering strictly to RFC 768 UDP semantics; active flow sockets are closed immediately on forwarder stop without leaking ephemeral ports.
 * **Two-Phase Server Plugin Pipeline:** Server plugins can participate in atomic proxy creation transactions via `NewProxyResult` with immutable 128-bit `attempt_id` correlation and a high-capacity 2048-entry non-blocking `CloseProxy` FIFO.
-* **Programmatic Embedding & System CA:** `ServiceOptions.OnFirstLoginSuccess` hook to inspect and veto authenticated sessions before proxy registration; sanitized error logging for Unix domain socket paths; `useSystemCa` supported across all TLS transports including QUIC and WSS.
+* **Programmatic Embedding & System CA:** `ServiceOptions.OnFirstLoginSuccess` hook to inspect and veto authenticated sessions before proxy registration; sanitized error logging for Unix domain socket paths; `transport.tls.useSystemCa` supported on frpc transports including QUIC and WSS (web/metrics server TLS excluded).
 
 ---
 
@@ -165,6 +165,7 @@ remotePort = 51820
 quicDatagrams = true
 quicDatagramStrict = true
 ```
+Note: the server must set `quicBindPort` (see `doc/quic_datagrams.md`) for QUIC to be available.
 For complete details, see the [QUIC Datagrams Guide](doc/quic_datagrams.md).
 
 ---
