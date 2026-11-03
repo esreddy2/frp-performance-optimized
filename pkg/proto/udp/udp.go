@@ -306,7 +306,12 @@ func forwarderWithOptions(
 					ppBuf, err := netpkg.BuildProxyProtocolHeader(udpMsg.RemoteAddr, dstAddr, options.ProxyProtocol)
 					if err == nil {
 						// Prepend proxy protocol header to the UDP payload
-						finalBuf := make([]byte, len(ppBuf)+len(buf))
+						finalBuf := ppBufPool.Get().([]byte)
+						if cap(finalBuf) < len(ppBuf)+len(buf) {
+							finalBuf = make([]byte, len(ppBuf)+len(buf))
+						} else {
+							finalBuf = finalBuf[:len(ppBuf)+len(buf)]
+						}
 						copy(finalBuf, ppBuf)
 						copy(finalBuf[len(ppBuf):], buf)
 						buf = finalBuf
@@ -335,4 +340,8 @@ func forwarderWithOptions(
 			}
 		}
 	}()
+}
+
+var ppBufPool = sync.Pool{
+	New: func() any { return make([]byte, 0, 1024) },
 }

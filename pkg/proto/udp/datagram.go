@@ -279,7 +279,12 @@ func encodeDgramFrame(name string, remoteAddr *net.UDPAddr, payload []byte) ([]b
 			Limit:       MaxDatagramPayloadSize(name, remoteAddr),
 		}
 	}
-	frame := make([]byte, 0, frameLen)
+	frame := dgramFramePool.Get().([]byte)
+	if cap(frame) < frameLen {
+		frame = make([]byte, 0, frameLen)
+	} else {
+		frame = frame[:0]
+	}
 	frame = append(frame, dgramFrameVersion, byte(len(name)))
 	frame = append(frame, name...)
 	frame = append(frame, byte(len(addr)))
@@ -327,4 +332,8 @@ func decodeDgramFrame(data []byte) (name string, remoteAddr *net.UDPAddr, payloa
 	payload = make([]byte, len(data)-(addrStart+addrLen))
 	copy(payload, data[addrStart+addrLen:])
 	return
+}
+
+var dgramFramePool = sync.Pool{
+	New: func() any { return make([]byte, 0, 256) },
 }
