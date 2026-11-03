@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"runtime/debug"
@@ -397,6 +398,9 @@ type SessionContext struct {
 	EncryptionKey []byte
 	// control connection
 	Conn *msg.Conn
+	// A mux session carries exactly one control. Close it when the control is
+	// replaced or exits fatally to release all remaining streams and work connections.
+	Session io.Closer
 	// login message
 	LoginMsg *msg.Login
 	// server configuration
@@ -656,12 +660,17 @@ func (ctl *Control) interruptReadAndClose() error {
 		ctl.workConns = make(map[*proxy.WorkConn]struct{})
 		ctl.mu.Unlock()
 		// Close outside mu: each stream removes itself through its callback.
-		// Close the batch in parallel, including the control transport, so a
-		// slow control close cannot postpone interruption of the work streams.
+		// When a mux session carries this control, closing it releases every
+		// remaining stream and work connection at once; otherwise fall back to
+		// closing the control transport and interrupting work streams directly.
 		var closing sync.WaitGroup
-		closing.Go(func() { ctl.interruptErr = ctl.sessionCtx.Conn.Close() })
-		for conn := range owned {
-			closing.Go(func() { _ = conn.Interrupt() })
+		if ctl.sessionCtx.Session != nil {
+			closing.Go(func() { ctl.interruptErr = ctl.sessionCtx.Session.Close() })
+		} else {
+			closing.Go(func() { ctl.interruptErr = ctl.sessionCtx.Conn.Close() })
+			for conn := range owned {
+				closing.Go(func() { _ = conn.Interrupt() })
+			}
 		}
 		closing.Wait()
 	})
