@@ -312,7 +312,7 @@ func (sv *XTCPVisitor) makeNatHole() {
 	listenConn = newListenConn
 	xl.Infof("establishing nat hole connection successful, sid [%s], remoteAddr [%s]", natHoleRespMsg.Sid, raddr)
 
-	if err := sv.session.Init(listenConn, raddr); err != nil {
+	if err := sv.session.Init(sv.ctx, listenConn, raddr); err != nil {
 		listenConn.Close()
 		xl.Warnf("init tunnel session error: %v", err)
 		return
@@ -320,7 +320,7 @@ func (sv *XTCPVisitor) makeNatHole() {
 }
 
 type TunnelSession interface {
-	Init(listenConn *net.UDPConn, raddr *net.UDPAddr) error
+	Init(ctx context.Context, listenConn *net.UDPConn, raddr *net.UDPAddr) error
 	OpenConn(context.Context) (net.Conn, error)
 	Close()
 }
@@ -335,7 +335,7 @@ func NewKCPTunnelSession() TunnelSession {
 	return &KCPTunnelSession{}
 }
 
-func (ks *KCPTunnelSession) Init(listenConn *net.UDPConn, raddr *net.UDPAddr) error {
+func (ks *KCPTunnelSession) Init(ctx context.Context, listenConn *net.UDPConn, raddr *net.UDPAddr) error {
 	listenConn.Close()
 	laddr, _ := net.ResolveUDPAddr("udp", listenConn.LocalAddr().String())
 	lConn, err := net.DialUDP("udp", laddr, raddr)
@@ -401,19 +401,22 @@ func NewQUICTunnelSession(clientCfg *v1.ClientCommonConfig) TunnelSession {
 	}
 }
 
-func (qs *QUICTunnelSession) Init(listenConn *net.UDPConn, raddr *net.UDPAddr) error {
+func (qs *QUICTunnelSession) Init(ctx context.Context, listenConn *net.UDPConn, raddr *net.UDPAddr) error {
 	tlsConfig, err := transport.NewClientTLSConfig("", "", "", raddr.String())
 	if err != nil {
 		return fmt.Errorf("create tls config error: %v", err)
 	}
 	tlsConfig.NextProtos = []string{"frp"}
 	quicConfig := &quic.Config{
-		MaxIdleTimeout:     time.Duration(qs.clientCfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
-		MaxIncomingStreams: int64(qs.clientCfg.Transport.QUIC.MaxIncomingStreams),
-		KeepAlivePeriod:    time.Duration(qs.clientCfg.Transport.QUIC.KeepalivePeriod) * time.Second,
-		EnableDatagrams:    lo.FromPtr(qs.clientCfg.Transport.QUIC.EnableDatagrams),
+		MaxIdleTimeout:             time.Duration(qs.clientCfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
+		MaxIncomingStreams:         int64(qs.clientCfg.Transport.QUIC.MaxIncomingStreams),
+		KeepAlivePeriod:            time.Duration(qs.clientCfg.Transport.QUIC.KeepalivePeriod) * time.Second,
+		EnableDatagrams:            lo.FromPtr(qs.clientCfg.Transport.QUIC.EnableDatagrams),
+		MaxStreamReceiveWindow:     1 << 20,
+		MaxConnectionReceiveWindow: 4 << 20,
 	}
-	quicConn, err := quic.Dial(context.Background(), listenConn, raddr, tlsConfig, quicConfig)
+	quicConfig.TokenStore = quic.NewLRUTokenStore(4, 4)
+	quicConn, err := quic.Dial(ctx, listenConn, raddr, tlsConfig, quicConfig)
 	if err != nil {
 		return fmt.Errorf("dial quic error: %v", err)
 	}

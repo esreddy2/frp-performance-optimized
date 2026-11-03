@@ -84,6 +84,9 @@ func NewUDPProxy(baseProxy *BaseProxy) Proxy {
 	baseProxy.usedPortsNum = 1
 	// QUIC datagram relay bypasses the work-connection stream, so it can't
 	// honor the per-proxy stream wrappers (encryption/compression).
+	if unwrapped.QUICDatagrams && (unwrapped.Transport.UseEncryption || unwrapped.Transport.UseCompression) {
+		baseProxy.xl.Warnf("udp proxy [%s] requested quic datagrams but encryption or compression is enabled; quic datagrams ignored, using stream", baseProxy.name)
+	}
 	baseProxy.udpDatagramWanted = unwrapped.QUICDatagrams &&
 		!unwrapped.Transport.UseEncryption && !unwrapped.Transport.UseCompression
 	baseProxy.udpDatagramStrict = baseProxy.udpDatagramWanted && unwrapped.QUICDatagramStrict
@@ -352,34 +355,38 @@ func (pxy *UDPProxy) runWithStreams(xl *xlog.Logger, udpConn *net.UDPConn) {
 			if pxy.udpDatagramWanted {
 				if qc := netpkg.GetQuicConnFromNetConn(workConn); qc != nil && qc.ConnectionState().SupportsDatagrams.Remote {
 					dgMux = udp.DatagramMuxFor(qc)
-					dgMux.Register(pxy.GetName(), func(remoteAddr *net.UDPAddr, payload []byte) {
-						// The bandwidth limiter can only police (drop)
-						// here, not shape: this callback runs on the quic
-						// connection's shared receive loop, which must
-						// never block.
-						if !limit.AllowN(pxy.GetLimiter(), time.Now(), len(payload)) {
-							return
-						}
-						m := udp.NewUDPPacket(payload, nil, remoteAddr)
-						_ = liberrors.PanicToError(func() {
-							select {
-							// The datagram came from frpc, so it belongs
-							// on readCh, which ForwardUserConn drains into
-							// the user connection. sendCh carries the
-							// opposite direction (user -> frpc).
-							case pxy.readCh <- m:
-								metrics.Server.AddTrafficOut(
-									pxy.GetName(),
-									pxy.GetConfigurer().GetBaseConfig().Type,
-									int64(len(m.Content)),
-								)
-							case <-pxy.stopCh:
-							default:
+					if dgMux == nil {
+						pxy.xl.Warnf("server enabled quic datagrams but DatagramMuxFor returned nil; using stream")
+					} else {
+						dgMux.Register(pxy.GetName(), func(remoteAddr *net.UDPAddr, payload []byte) {
+							// The bandwidth limiter can only police (drop)
+							// here, not shape: this callback runs on the quic
+							// connection's shared receive loop, which must
+							// never block.
+							if !limit.AllowN(pxy.GetLimiter(), time.Now(), len(payload)) {
+								return
 							}
+							m := udp.NewUDPPacket(payload, nil, remoteAddr)
+							_ = liberrors.PanicToError(func() {
+								select {
+								// The datagram came from frpc, so it belongs
+								// on readCh, which ForwardUserConn drains into
+								// the user connection. sendCh carries the
+								// opposite direction (user -> frpc).
+								case pxy.readCh <- m:
+									metrics.Server.AddTrafficOut(
+										pxy.GetName(),
+										pxy.GetConfigurer().GetBaseConfig().Type,
+										int64(len(m.Content)),
+									)
+								case <-pxy.stopCh:
+								default:
+								}
+							})
 						})
-					})
-					xl.Infof("udp proxy relaying via quic datagrams (max frame %d bytes, %d bytes of frame overhead for the proxy name)",
-						udp.DatagramFrameBudget, udp.DatagramFrameHeaderOverhead+len(pxy.GetName()))
+						xl.Infof("udp proxy relaying via quic datagrams (max frame %d bytes, %d bytes of frame overhead for the proxy name)",
+							udp.DatagramFrameBudget, udp.DatagramFrameHeaderOverhead+len(pxy.GetName()))
+					}
 				}
 			}
 

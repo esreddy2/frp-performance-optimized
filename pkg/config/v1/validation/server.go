@@ -71,6 +71,10 @@ func (v *ConfigValidator) ValidateServerConfig(c *v1.ServerConfig) (Warning, err
 	if c.Transport.MaxPoolCount < 0 {
 		errs = AppendError(errs, fmt.Errorf("invalid transport.maxPoolCount, must be non-negative"))
 	}
+	q := c.Transport.QUIC
+	if q.KeepalivePeriod < 0 || q.MaxIdleTimeout < 0 || q.MaxIncomingStreams < 0 {
+		errs = AppendError(errs, fmt.Errorf("invalid transport.quic options, values must be positive"))
+	}
 
 	newProxyPluginCount := 0
 	newProxyResultPluginCount := 0

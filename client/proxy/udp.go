@@ -205,10 +205,6 @@ func udpHeartbeat(sendCh chan msg.Message, closeCh <-chan struct{}, tick <-chan 
 }
 
 // InWorkConn is called when a new work connection is established.
-// For QUIC with datagrams enabled, the datagram path is set up eagerly in
-// Run(), so work connections are not used for UDP traffic. We still accept
-// the work connection to keep the client's pool healthy but do not forward
-// data through it.
 func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 	xl := pxy.xl
 	xl.Infof("incoming a new work connection for udp proxy, %s", conn.RemoteAddr().String())
@@ -217,12 +213,17 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 	// Requires the negotiated transport to be QUIC and the peer to support
 	// datagrams; mixed-version peers fall back to the stream path silently.
 	var dgMux *udp.DatagramMux
-	if startMsg != nil && startMsg.UDPDatagram &&
-		!pxy.cfg.Transport.UseEncryption && !pxy.cfg.Transport.UseCompression {
-		if qc := netpkg.GetQuicConnFromNetConn(conn); qc != nil && qc.ConnectionState().SupportsDatagrams.Remote {
+	if startMsg != nil && startMsg.UDPDatagram {
+		if pxy.cfg.Transport.UseEncryption || pxy.cfg.Transport.UseCompression {
+			xl.Warnf("quic datagrams requested by server but disabled because encryption or compression is enabled; using stream")
+		} else if qc := netpkg.GetQuicConnFromNetConn(conn); qc != nil && qc.ConnectionState().SupportsDatagrams.Remote {
 			dgMux = udp.DatagramMuxFor(qc)
-			xl.Infof("udp proxy relaying via quic datagrams (max frame %d bytes, %d bytes of frame overhead for the proxy name)",
-				udp.DatagramFrameBudget, udp.DatagramFrameHeaderOverhead+len(pxy.datagramName()))
+			if dgMux == nil {
+				xl.Warnf("server enabled quic datagrams but DatagramMuxFor returned nil; using stream")
+			} else {
+				xl.Infof("udp proxy relaying via quic datagrams (max frame %d bytes, %d bytes of frame overhead for the proxy name)",
+					udp.DatagramFrameBudget, udp.DatagramFrameHeaderOverhead+len(pxy.datagramName()))
+			}
 		} else {
 			xl.Warnf("server enabled quic datagrams but work connection does not support them, using stream")
 		}

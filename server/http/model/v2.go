@@ -119,7 +119,9 @@ type V2TCPProxySpec struct {
 
 type V2UDPProxySpec struct {
 	V2ProxyBaseSpec
-	RemotePort *int `json:"remotePort,omitempty"`
+	RemotePort         *int `json:"remotePort,omitempty"`
+	QUICDatagrams      bool `json:"quicDatagrams,omitempty"`
+	QUICDatagramStrict bool `json:"quicDatagramStrict,omitempty"`
 }
 
 type V2HTTPProxySpec struct {

@@ -329,7 +329,7 @@ func getConfFromConfigurer(cfg v1.ProxyConfigurer) any {
 	case *v1.TCPProxyConfig:
 		return &model.TCPOutConf{BaseOutConf: outBase, RemotePort: c.RemotePort}
 	case *v1.UDPProxyConfig:
-		return &model.UDPOutConf{BaseOutConf: outBase, RemotePort: c.RemotePort}
+		return &model.UDPOutConf{BaseOutConf: outBase, RemotePort: c.RemotePort, QUICDatagrams: c.QUICDatagrams, QUICDatagramStrict: c.QUICDatagramStrict}
 	case *v1.HTTPProxyConfig:
 		return &model.HTTPOutConf{
 			BaseOutConf:       outBase,

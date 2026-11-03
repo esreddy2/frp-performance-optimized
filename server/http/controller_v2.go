@@ -577,6 +577,8 @@ func buildV2ProxySpec(proxyType string, cfg v1.ProxyConfigurer) model.V2ProxySpe
 		if c, ok := cfg.(*v1.UDPProxyConfig); ok {
 			block.V2ProxyBaseSpec = buildV2ProxyBaseSpec(c.GetBaseConfig())
 			block.RemotePort = &c.RemotePort
+			block.QUICDatagrams = c.QUICDatagrams
+			block.QUICDatagramStrict = c.QUICDatagramStrict
 		}
 		spec.UDP = block
 	case string(v1.ProxyTypeHTTP):

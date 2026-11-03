@@ -178,6 +178,12 @@ func validateTransportConfig(c *v1.ClientTransportConfig) (Warning, error) {
 	if !slices.Contains(SupportedTransportProtocols, c.Protocol) {
 		errs = AppendError(errs, fmt.Errorf("invalid transport.protocol, optional values are %v", SupportedTransportProtocols))
 	}
+	if c.Protocol == "quic" {
+		q := c.QUIC
+		if q.KeepalivePeriod < 0 || q.MaxIdleTimeout < 0 || q.MaxIncomingStreams < 0 {
+			errs = AppendError(errs, fmt.Errorf("invalid transport.quic options, values must be positive"))
+		}
+	}
 	if !slices.Contains(SupportedWireProtocols, c.WireProtocol) {
 		errs = AppendError(errs, fmt.Errorf("invalid transport.wireProtocol, optional values are %v", SupportedWireProtocols))
 	}
@@ -232,9 +238,14 @@ func ValidateAllClientConfig(
 	if c != nil {
 		user = c.User
 	}
-	for _, c := range proxyCfgs {
-		if err := ValidateProxyConfigurerForClient(c, user); err != nil {
-			return warnings, fmt.Errorf("proxy %s: %v", c.GetBaseConfig().Name, err)
+	for _, pc := range proxyCfgs {
+		if err := ValidateProxyConfigurerForClient(pc, user); err != nil {
+			return warnings, fmt.Errorf("proxy %s: %v", pc.GetBaseConfig().Name, err)
+		}
+		if uc, ok := pc.(*v1.UDPProxyConfig); ok && uc.QUICDatagrams {
+			if c != nil && c.Transport.Protocol != "quic" {
+				return warnings, fmt.Errorf("proxy %s: quicDatagrams requires transport.protocol to be quic", pc.GetBaseConfig().Name)
+			}
 		}
 	}
 

@@ -17,6 +17,7 @@ package udp
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"strings"
@@ -202,6 +203,7 @@ func (m *DatagramMux) receiveLoop() {
 func (m *DatagramMux) dispatch(data []byte) {
 	name, addr, payload, err := decodeDgramFrame(data)
 	if err != nil {
+		log.Printf("trace: dropped udp datagram frame: %v", err)
 		return
 	}
 	m.mu.RLock()
@@ -259,7 +261,7 @@ func encodeDgramFrame(name string, remoteAddr *net.UDPAddr, payload []byte) ([]b
 		return nil, errors.New("udp datagram without remote address")
 	}
 	addr := remoteAddr.String()
-	if len(name) > naming.MaxDatagramIdentifierLength {
+	if len(name) == 0 || len(name) > naming.MaxDatagramIdentifierLength {
 		return nil, fmt.Errorf("%w: proxy name %d bytes exceeds %d",
 			ErrDatagramHeaderTooLong, len(name), naming.MaxDatagramIdentifierLength)
 	}
@@ -292,6 +294,10 @@ func decodeDgramFrame(data []byte) (name string, remoteAddr *net.UDPAddr, payloa
 		return
 	}
 	nameLen := int(data[1])
+	if nameLen == 0 || nameLen > naming.MaxDatagramIdentifierLength {
+		err = errors.New("malformed udp datagram frame: name length")
+		return
+	}
 	if len(data) < 2+nameLen+1 {
 		err = errors.New("malformed udp datagram frame: name")
 		return

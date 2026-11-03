@@ -55,7 +55,6 @@ func Convert_ClientCommonConf_To_v1(conf *ClientCommonConf) *v1.ClientCommonConf
 	out.Transport.QUIC.KeepalivePeriod = conf.QUICKeepalivePeriod
 	out.Transport.QUIC.MaxIdleTimeout = conf.QUICMaxIdleTimeout
 	out.Transport.QUIC.MaxIncomingStreams = conf.QUICMaxIncomingStreams
-	out.Transport.QUIC.EnableDatagrams = new(conf.QUICEnableDatagrams)
 	out.Transport.QUIC.Enable0RTT = new(conf.QUICEnable0RTT)
 	out.Transport.TLS.Enable = new(conf.TLSEnable)
 	out.Transport.TLS.DisableCustomTLSFirstByte = new(conf.DisableCustomTLSFirstByte)
@@ -107,7 +106,6 @@ func Convert_ServerCommonConf_To_v1(conf *ServerCommonConf) *v1.ServerConfig {
 	out.Transport.QUIC.KeepalivePeriod = conf.QUICKeepalivePeriod
 	out.Transport.QUIC.MaxIdleTimeout = conf.QUICMaxIdleTimeout
 	out.Transport.QUIC.MaxIncomingStreams = conf.QUICMaxIncomingStreams
-	out.Transport.QUIC.EnableDatagrams = new(conf.QUICEnableDatagrams)
 	out.Transport.QUIC.Enable0RTT = new(conf.QUICEnable0RTT)
 
 	out.ProxyBindAddr = conf.ProxyBindAddr
@@ -278,6 +276,8 @@ func Convert_ProxyConf_To_v1(conf ProxyConf) v1.ProxyConfigurer {
 	case *UDPProxyConf:
 		c := &v1.UDPProxyConfig{ProxyBaseConfig: *outBase}
 		c.RemotePort = v.RemotePort
+		c.QUICDatagrams = v.QUICDatagrams
+		c.QUICDatagramStrict = v.QUICDatagramStrict
 		out = c
 	case *HTTPProxyConf:
 		c := &v1.HTTPProxyConfig{ProxyBaseConfig: *outBase}

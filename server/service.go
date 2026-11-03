@@ -300,10 +300,12 @@ func NewService(cfg *v1.ServerConfig) (svr *Service, err error) {
 		svr.quicTransport = quicTransport
 		svr.quicConn = udpConn
 		svr.quicListener, err = quicTransport.Listen(quicTLSCfg, &quic.Config{
-			MaxIdleTimeout:     time.Duration(cfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
-			MaxIncomingStreams: int64(cfg.Transport.QUIC.MaxIncomingStreams),
-			KeepAlivePeriod:    time.Duration(cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
-			EnableDatagrams:    lo.FromPtr(cfg.Transport.QUIC.EnableDatagrams),
+			MaxIdleTimeout:             time.Duration(cfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
+			MaxIncomingStreams:         int64(cfg.Transport.QUIC.MaxIncomingStreams),
+			KeepAlivePeriod:            time.Duration(cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
+			EnableDatagrams:            lo.FromPtr(cfg.Transport.QUIC.EnableDatagrams),
+			MaxStreamReceiveWindow:     1 << 20,
+			MaxConnectionReceiveWindow: 4 << 20,
 			// frp never accepts QUIC 0-RTT early data. Every message frp
 			// sends first on a QUIC connection carries the client's
 			// credential, and 0-RTT early data is replayable: an on-path
@@ -538,7 +540,7 @@ func (svr *Service) Run(ctx context.Context) {
 		go svr.HandleListener(svr.kcpListener, false)
 	}
 	if svr.quicListener != nil {
-		go svr.HandleQUICListener(svr.quicListener)
+		go svr.HandleQUICListener(svr.ctx, svr.quicListener)
 	}
 	go svr.HandleListener(svr.websocketListener, false)
 	go svr.HandleListener(svr.tlsListener, false)
@@ -966,10 +968,10 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 	}
 }
 
-func (svr *Service) HandleQUICListener(l *quic.Listener) {
+func (svr *Service) HandleQUICListener(ctx context.Context, l *quic.Listener) {
 	// Listen for incoming connections from client.
 	for {
-		c, err := l.Accept(context.Background())
+		c, err := l.Accept(ctx)
 		if err != nil {
 			log.Warnf("quic listener for incoming connections from client closed")
 			return
@@ -977,7 +979,7 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 		// Start a new goroutine to handle connection.
 		go func(ctx context.Context, frpConn *quic.Conn) {
 			for {
-				stream, err := frpConn.AcceptStream(context.Background())
+				stream, err := frpConn.AcceptStream(ctx)
 				if err != nil {
 					log.Debugf("accept new quic mux stream error: %v", err)
 					_ = frpConn.CloseWithError(0, "")
@@ -985,7 +987,7 @@ func (svr *Service) HandleQUICListener(l *quic.Listener) {
 				}
 				go svr.handleConnection(ctx, netpkg.QuicStreamToNetConn(stream, frpConn), false)
 			}
-		}(context.Background(), c)
+		}(ctx, c)
 	}
 }
 

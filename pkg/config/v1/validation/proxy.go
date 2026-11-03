@@ -232,6 +232,16 @@ func validateTCPProxyConfigForServer(c *v1.TCPProxyConfig, s *v1.ServerConfig) e
 }
 
 func validateUDPProxyConfigForServer(c *v1.UDPProxyConfig, s *v1.ServerConfig) error {
+	_ = s
+	if c.QUICDatagramStrict && !c.QUICDatagrams {
+		return errors.New("quicDatagramStrict requires quicDatagrams to be true")
+	}
+	if c.QUICDatagrams {
+		if len(c.Name) > naming.MaxDatagramIdentifierLength {
+			return fmt.Errorf("the quic datagram lane needs a proxy name of at most %d bytes, but the name is %d bytes",
+				naming.MaxDatagramIdentifierLength, len(c.Name))
+		}
+	}
 	return nil
 }
 

@@ -73,7 +73,9 @@ type TCPMuxOutConf struct {
 
 type UDPOutConf struct {
 	BaseOutConf
-	RemotePort int `json:"remotePort"`
+	RemotePort         int  `json:"remotePort"`
+	QUICDatagrams      bool `json:"quicDatagrams,omitempty"`
+	QUICDatagramStrict bool `json:"quicDatagramStrict,omitempty"`
 }
 
 type HTTPOutConf struct {

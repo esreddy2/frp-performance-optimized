@@ -287,7 +287,9 @@ func (cfg *TCPProxyConf) UnmarshalFromIni(prefix string, name string, section *i
 type UDPProxyConf struct {
 	BaseProxyConf `ini:",extends"`
 
-	RemotePort int `ini:"remote_port" json:"remote_port"`
+	RemotePort         int  `ini:"remote_port" json:"remote_port"`
+	QUICDatagrams      bool `ini:"quic_datagrams" json:"quicDatagrams,omitempty"`
+	QUICDatagramStrict bool `ini:"quic_datagram_strict" json:"quicDatagramStrict,omitempty"`
 }
 
 func (cfg *UDPProxyConf) UnmarshalFromIni(prefix string, name string, section *ini.Section) error {

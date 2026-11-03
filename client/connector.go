@@ -146,10 +146,12 @@ func (c *defaultConnectorImpl) Open() error {
 		tlsConfig.NextProtos = []string{"frp"}
 
 		quicConfig := &quic.Config{
-			MaxIdleTimeout:     time.Duration(c.cfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
-			MaxIncomingStreams: int64(c.cfg.Transport.QUIC.MaxIncomingStreams),
-			KeepAlivePeriod:    time.Duration(c.cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
-			EnableDatagrams:    lo.FromPtr(c.cfg.Transport.QUIC.EnableDatagrams),
+			MaxIdleTimeout:             time.Duration(c.cfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
+			MaxIncomingStreams:         int64(c.cfg.Transport.QUIC.MaxIncomingStreams),
+			KeepAlivePeriod:            time.Duration(c.cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
+			EnableDatagrams:            lo.FromPtr(c.cfg.Transport.QUIC.EnableDatagrams),
+			MaxStreamReceiveWindow:     1 << 20,
+			MaxConnectionReceiveWindow: 4 << 20,
 		}
 		if lo.FromPtr(c.cfg.Transport.QUIC.Enable0RTT) {
 			// frp does not use QUIC 0-RTT. The option only enables the
@@ -199,7 +201,7 @@ func (c *defaultConnectorImpl) Open() error {
 // Connect returns a stream from the underlying connection, or a new TCP connection if TCPMux isn't enabled.
 func (c *defaultConnectorImpl) Connect() (net.Conn, error) {
 	if c.quicConn != nil {
-		stream, err := c.quicConn.OpenStreamSync(context.Background())
+		stream, err := c.quicConn.OpenStreamSync(c.ctx)
 		if err != nil {
 			return nil, err
 		}

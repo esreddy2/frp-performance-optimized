@@ -49,9 +49,15 @@ type QUICOptions struct {
 }
 
 func (c *QUICOptions) Complete() {
-	c.KeepalivePeriod = util.EmptyOr(c.KeepalivePeriod, 10)
-	c.MaxIdleTimeout = util.EmptyOr(c.MaxIdleTimeout, 30)
-	c.MaxIncomingStreams = util.EmptyOr(c.MaxIncomingStreams, 100000)
+	if c.KeepalivePeriod <= 0 {
+		c.KeepalivePeriod = 10
+	}
+	if c.MaxIdleTimeout <= 0 {
+		c.MaxIdleTimeout = 30
+	}
+	if c.MaxIncomingStreams <= 0 {
+		c.MaxIncomingStreams = 100000
+	}
 	c.EnableDatagrams = util.EmptyOr(c.EnableDatagrams, new(true))
 	c.Enable0RTT = util.EmptyOr(c.Enable0RTT, new(false))
 }

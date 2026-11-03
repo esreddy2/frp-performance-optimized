@@ -17,9 +17,12 @@
 package proxy
 
 import (
+	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"reflect"
+	"sync"
 	"time"
 
 	fmux "github.com/fatedier/yamux"
@@ -178,7 +181,12 @@ func (pxy *XTCPProxy) listenByKCP(listenConn *net.UDPConn, raddr *net.UDPAddr, s
 	}
 }
 
-func (pxy *XTCPProxy) listenByQUIC(listenConn *net.UDPConn, _ *net.UDPAddr, startWorkConnMsg *msg.StartWorkConn) {
+var (
+	xtcpQUICListenerTLSConfigOnce sync.Once
+	xtcpQUICListenerTLSConfig     *tls.Config
+)
+
+func (pxy *XTCPProxy) listenByQUIC(listenConn *net.UDPConn, raddr *net.UDPAddr, startWorkConnMsg *msg.StartWorkConn) {
 	xl := pxy.xl
 	var quicListener *quic.Listener
 	defer func() {
@@ -189,40 +197,55 @@ func (pxy *XTCPProxy) listenByQUIC(listenConn *net.UDPConn, _ *net.UDPAddr, star
 		}
 	}()
 
-	tlsConfig, err := transport.NewServerTLSConfig("", "", "")
-	if err != nil {
-		xl.Warnf("create tls config error: %v", err)
+	xtcpQUICListenerTLSConfigOnce.Do(func() {
+		tc, err := transport.NewServerTLSConfig("", "", "")
+		if err != nil {
+			xl.Warnf("create tls config error: %v", err)
+			return
+		}
+		tc.NextProtos = []string{"frp"}
+		xtcpQUICListenerTLSConfig = tc
+	})
+	tlsConfig := xtcpQUICListenerTLSConfig
+	if tlsConfig == nil {
 		return
 	}
 	tlsConfig.NextProtos = []string{"frp"}
 	quicConfig := &quic.Config{
-		MaxIdleTimeout:     time.Duration(pxy.clientCfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
-		MaxIncomingStreams: int64(pxy.clientCfg.Transport.QUIC.MaxIncomingStreams),
-		KeepAlivePeriod:    time.Duration(pxy.clientCfg.Transport.QUIC.KeepalivePeriod) * time.Second,
-		EnableDatagrams:    lo.FromPtr(pxy.clientCfg.Transport.QUIC.EnableDatagrams),
-		// The visitor authenticates itself with the first message it
-		// sends, so this listener must not accept replayable 0-RTT early
-		// data. See the QUIC listener in server/service.go.
-		Allow0RTT: false,
+		MaxIdleTimeout:             time.Duration(pxy.clientCfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
+		MaxIncomingStreams:         int64(pxy.clientCfg.Transport.QUIC.MaxIncomingStreams),
+		KeepAlivePeriod:            time.Duration(pxy.clientCfg.Transport.QUIC.KeepalivePeriod) * time.Second,
+		EnableDatagrams:            lo.FromPtr(pxy.clientCfg.Transport.QUIC.EnableDatagrams),
+		MaxStreamReceiveWindow:     1 << 20,
+		MaxConnectionReceiveWindow: 4 << 20,
+		Allow0RTT:                  false,
 	}
+	var err error
 	quicListener, err = quic.Listen(listenConn, tlsConfig, quicConfig)
 	if err != nil {
 		xl.Warnf("dial quic error: %v", err)
 		return
 	}
-	// only accept one connection from raddr
-	c, err := quicListener.Accept(pxy.ctx)
-	if err != nil {
-		xl.Errorf("quic accept connection error: %v", err)
-		return
-	}
 	for {
-		stream, err := c.AcceptStream(pxy.ctx)
+		c, err := quicListener.Accept(pxy.ctx)
 		if err != nil {
-			xl.Debugf("quic accept stream error: %v", err)
-			_ = c.CloseWithError(0, "")
 			return
 		}
-		go pxy.HandleTCPWorkConnection(netpkg.QuicStreamToNetConn(stream, c), startWorkConnMsg, []byte(pxy.cfg.Secretkey))
+		if c.RemoteAddr().String() != raddr.String() {
+			_ = c.CloseWithError(0, "")
+			continue
+		}
+		go func(conn *quic.Conn) {
+			for {
+				ctx, cancel := context.WithTimeout(pxy.ctx, 30*time.Second)
+				stream, err := conn.AcceptStream(ctx)
+				cancel()
+				if err != nil {
+					_ = conn.CloseWithError(0, "")
+					return
+				}
+				go pxy.HandleTCPWorkConnection(netpkg.QuicStreamToNetConn(stream, conn), startWorkConnMsg, []byte(pxy.cfg.Secretkey))
+			}
+		}(c)
 	}
 }
