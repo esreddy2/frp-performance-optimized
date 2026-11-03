@@ -184,6 +184,9 @@ func validateTransportConfig(c *v1.ClientTransportConfig) (Warning, error) {
 			errs = AppendError(errs, fmt.Errorf("invalid transport.quic options, values must be positive"))
 		}
 	}
+	if c.TCPNotSentLowat < 0 || c.TCPSendBuffer < 0 {
+		errs = AppendError(errs, fmt.Errorf("invalid transport.tcpNotSentLowat or transport.tcpSendBuffer, values must be non-negative"))
+	}
 	if !slices.Contains(SupportedWireProtocols, c.WireProtocol) {
 		errs = AppendError(errs, fmt.Errorf("invalid transport.wireProtocol, optional values are %v", SupportedWireProtocols))
 	}

@@ -113,6 +113,15 @@ transport.poolCount = 5
 # only valid if tcpMux is enabled.
 # transport.tcpMuxKeepaliveInterval = 30
 
+# TCP_NOTSENT_LOWAT socket option value (in bytes) applied to the connection
+# to the server. Reduces buffer bloat by limiting unsent data queued in the
+# kernel. Zero leaves the system default. Linux only.
+# transport.tcpNotSentLowat = 0
+
+# TCP send buffer size (in bytes) applied to the connection to the server.
+# Zero leaves the system default.
+# transport.tcpSendBuffer = 0
+
 # Communication protocol used to connect to server
 # supports tcp, kcp, quic, websocket and wss now, default is tcp
 transport.protocol = "tcp"

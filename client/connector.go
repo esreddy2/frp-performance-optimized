@@ -270,6 +270,7 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 	if err == nil {
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
 			_ = tcpConn.SetNoDelay(true)
+			_ = applyTCPSendQueueOpts(tcpConn, c.cfg.Transport.TCPNotSentLowat, c.cfg.Transport.TCPSendBuffer)
 		}
 	}
 	return conn, err
