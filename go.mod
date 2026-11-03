@@ -2,6 +2,8 @@ module github.com/fatedier/frp
 
 go 1.26.0
 
+toolchain go1.26.10
+
 godebug multipathtcp=0
 
 require (
