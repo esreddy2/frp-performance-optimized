@@ -78,7 +78,6 @@ func TestValidateDomainConfigForServerRejectsSubdomainHostCaseInsensitively(t *t
 	}
 }
 
-<<<<<<< HEAD
 // The quic datagram lane identifies a proxy by its wire-level name, and the
 // identifier field of a datagram frame holds a single length byte. The
 // wire-level name is the proxy name with the user prefix, so the limit
@@ -343,7 +342,7 @@ func TestProxyBaseConfigCompleteSocketMarkDefaulting(t *testing.T) {
 	base4.Complete()
 	require.Equal(t, "tproxy", base4.Transport.ProxyProtocol)
 	require.Equal(t, 1, base4.Transport.SocketMark)
-=======
+
 func TestValidateAnnotationsQualifiedName(t *testing.T) {
 	require.NoError(t, ValidateAnnotations(map[string]string{
 		"frp.e2e.test/foo":       "value1",
@@ -357,5 +356,4 @@ func TestValidateAnnotationsQualifiedName(t *testing.T) {
 
 	err = ValidateAnnotations(map[string]string{"example.com/": "value"})
 	require.ErrorContains(t, err, "name part must be non-empty")
->>>>>>> 4c07ebda (refactor(validation): inline annotation qualified name check (#5601))
 }
