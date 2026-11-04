@@ -20,10 +20,9 @@ import (
 	"slices"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/util/validation"
-
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/naming"
+	utilvalidation "github.com/fatedier/frp/pkg/util/validation"
 )
 
 func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
@@ -290,7 +289,7 @@ func ValidateAnnotations(annotations map[string]string) error {
 
 	var errs error
 	for k := range annotations {
-		for _, msg := range validation.IsQualifiedName(strings.ToLower(k)) {
+		for _, msg := range utilvalidation.IsQualifiedName(strings.ToLower(k)) {
 			errs = AppendError(errs, fmt.Errorf("annotation key %s is invalid: %s", k, msg))
 		}
 	}
