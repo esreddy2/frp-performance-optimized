@@ -286,6 +286,7 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 			f.RunServer("", pluginServer)
 
 			serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
+			detailedErrorsToClient = true
 			[[httpPlugins]]
 			name = "result-rejector"
 			addr = "127.0.0.1:%d"
@@ -556,6 +557,7 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 			addr = "https://127.0.0.1:%d"
 			path = "/handler"
 			ops = ["NewUserConn"]
+			tlsVerify = false
 			`, localPort)
 
 			remotePort := f.AllocPort()
