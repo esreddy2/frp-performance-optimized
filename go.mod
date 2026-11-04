@@ -21,7 +21,7 @@ require (
 	github.com/rodaine/table v1.4.1
 	github.com/samber/lo v1.53.0
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
-	github.com/spf13/cobra v1.8.0
+	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.12.1
 	github.com/tidwall/gjson v1.17.1
