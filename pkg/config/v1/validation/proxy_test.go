@@ -342,6 +342,7 @@ func TestProxyBaseConfigCompleteSocketMarkDefaulting(t *testing.T) {
 	base4.Complete()
 	require.Equal(t, "tproxy", base4.Transport.ProxyProtocol)
 	require.Equal(t, 1, base4.Transport.SocketMark)
+}
 
 func TestValidateAnnotationsQualifiedName(t *testing.T) {
 	require.NoError(t, ValidateAnnotations(map[string]string{
