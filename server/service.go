@@ -811,6 +811,9 @@ type acceptedConnection struct {
 
 func (svr *Service) acceptConnection(ctx context.Context, conn net.Conn) (*acceptedConnection, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(connReadTimeout))
+	defer func() {
+		_ = conn.SetReadDeadline(time.Time{})
+	}()
 	checkedConn, isV2, err := wire.CheckMagic(conn)
 	if err != nil {
 		return nil, fmt.Errorf("read wire protocol magic: %w", err)
@@ -990,6 +993,12 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 
 		// Start a new goroutine to handle connection.
 		go func(ctx context.Context, frpConn net.Conn) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("handle connection panic: %v", r)
+				}
+				frpConn.Close()
+			}()
 			if lo.FromPtr(svr.cfg.Transport.TCPMux) && !internal {
 				fmuxCfg := fmux.DefaultConfig()
 				fmuxCfg.KeepAliveInterval = time.Duration(svr.cfg.Transport.TCPMuxKeepaliveInterval) * time.Second
