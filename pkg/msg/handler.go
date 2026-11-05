@@ -16,6 +16,7 @@ package msg
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -77,14 +78,14 @@ func NewV1ReadWriter(rw io.ReadWriter) ReadWriter {
 
 // NewReadWriter wraps rw with the message codec for the selected wire protocol.
 // An empty protocol keeps the historical v1 behavior for tests and older call sites.
-func NewReadWriter(rw io.ReadWriter, wireProtocol string) ReadWriter {
+func NewReadWriter(rw io.ReadWriter, wireProtocol string) (ReadWriter, error) {
 	switch wireProtocol {
 	case wire.ProtocolV2:
-		return NewV2ReadWriter(rw)
+		return NewV2ReadWriter(rw), nil
 	case "", wire.ProtocolV1:
-		return NewV1ReadWriter(rw)
+		return NewV1ReadWriter(rw), nil
 	default:
-		return NewV1ReadWriter(rw)
+		return nil, fmt.Errorf("unsupported wire protocol %q", wireProtocol)
 	}
 }
 
@@ -102,7 +103,10 @@ func (rw *V1ReadWriter) WriteMsg(m Message) error {
 
 func AsyncHandler(f func(Message)) func(Message) {
 	return func(m Message) {
-		go f(m)
+		go func() {
+			defer func() { _ = recover() }()
+			f(m)
+		}()
 	}
 }
 

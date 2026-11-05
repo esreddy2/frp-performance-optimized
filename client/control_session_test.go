@@ -207,7 +207,11 @@ func TestControlSessionDialerDialV2(t *testing.T) {
 			serverErrCh <- err
 			return
 		}
-		controlMsgRW := msg.NewReadWriter(controlRW, wire.ProtocolV2)
+		controlMsgRW, err := msg.NewReadWriter(controlRW, wire.ProtocolV2)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
 		var ping msg.Ping
 		if err := controlMsgRW.ReadMsgInto(&ping); err != nil {
 			serverErrCh <- err

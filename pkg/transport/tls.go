@@ -19,9 +19,11 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"time"
 )
@@ -54,8 +56,13 @@ func newRandomTLSKeyPair() (*tls.Certificate, error) {
 
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
+		Subject:      pkix.Name{CommonName: "frp"},
 		NotBefore:    time.Now().Add(-1 * time.Hour),
 		NotAfter:     time.Now().Add(365 * 24 * time.Hour * 10),
+		DNSNames:     []string{"localhost", "frp"},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 
 	certDER, err := x509.CreateCertificate(
@@ -147,6 +154,10 @@ func newClientTLSConfig(
 	useSystemCa bool,
 	systemCertPool func() (*x509.CertPool, error),
 ) (*tls.Config, error) {
+	if (certPath == "") != (keyPath == "") {
+		return nil, fmt.Errorf("both tls cert and key must be provided together")
+	}
+
 	base := &tls.Config{}
 
 	if certPath != "" && keyPath != "" {
@@ -162,11 +173,6 @@ func newClientTLSConfig(
 
 	switch {
 	case caPath != "" && useSystemCa:
-		// SystemCertPool returns a copy, so appending does not change the system pool.
-		// Design basis: Go 1.26.7 crypto/x509/verify.go:559-573 first uses the
-		// Windows/macOS verifier, then falls back to Go verification using only the
-		// added CAs if platform verification fails. This platform behavior has not been
-		// tested here; preserve the system pool instead of copying its subjects.
 		pool, err := systemCertPool()
 		if err != nil {
 			return nil, fmt.Errorf("failed to load system CA pool: %w", err)
@@ -188,17 +194,8 @@ func newClientTLSConfig(
 		base.RootCAs = pool
 		base.InsecureSkipVerify = false
 	case useSystemCa:
-		// A nil RootCAs makes crypto/tls use the host root store, through the
-		// platform verifier on macOS and Windows.
 		base.InsecureSkipVerify = false
 	default:
-		// frp's default TLS uses self-signed certificates and no trust store;
-		// verification is enabled whenever a CA or system pool is configured.
-		// Tradeoff: skipping verification by default keeps out-of-the-box
-		// deployments working with frp's generated self-signed certs, but it
-		// does not protect against MITM. Configure tls.trustedCaFile (or
-		// tls.useSystemCa) to enable verification. Kept intentional (AUD-015).
-		// lgtm[go/disabled-certificate-check]
 		base.InsecureSkipVerify = true
 	}
 

@@ -91,10 +91,12 @@ func TestIdleReadDeadlineRefreshIsLazy(t *testing.T) {
 	})
 
 	deadline := NewIdleReadDeadline(server, 60*time.Millisecond)
-	require.False(deadline.Refresh(), "a fresh deadline must not be moved")
+	moved, _ := deadline.Refresh()
+	require.False(moved, "a fresh deadline must not be moved")
 
 	time.Sleep(20 * time.Millisecond)
-	require.True(deadline.Refresh(), "a deadline past the quarter-window must be moved")
+	moved, _ = deadline.Refresh()
+	require.True(moved, "a deadline past the quarter-window must be moved")
 
 	deadline.Clear()
 }
@@ -131,7 +133,7 @@ func TestIdleReadDeadlineHeartbeatHalfWindowWithJitter(t *testing.T) {
 
 	for i, delta := range jitterDeltas {
 		time.Sleep(delta)
-		moved := deadline.Refresh()
+		moved, _ := deadline.Refresh()
 		require.True(moved, "heartbeat at iteration %d should refresh deadline", i)
 	}
 }

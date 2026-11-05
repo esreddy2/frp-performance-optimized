@@ -152,8 +152,13 @@ func ValidateServerHelloForClient(clientHello ClientHello, serverHello ServerHel
 	if len(cryptoSelection.ServerRandom) != CryptoRandomSize {
 		return fmt.Errorf("invalid crypto server random length %d, want %d", len(cryptoSelection.ServerRandom), CryptoRandomSize)
 	}
-	if len(cryptoSelection.ServerKeyShare) > 0 && len(clientHello.Capabilities.Crypto.ClientKeyShare) == 0 {
-		return fmt.Errorf("server sent a key share that was not advertised by client")
+	if len(cryptoSelection.ServerKeyShare) > 0 {
+		if len(cryptoSelection.ServerKeyShare) != 32 {
+			return fmt.Errorf("invalid server key share length %d, want 32", len(cryptoSelection.ServerKeyShare))
+		}
+		if len(clientHello.Capabilities.Crypto.ClientKeyShare) == 0 {
+			return fmt.Errorf("server sent a key share that was not advertised by client")
+		}
 	}
 	return nil
 }

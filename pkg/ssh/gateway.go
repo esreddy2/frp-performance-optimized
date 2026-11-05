@@ -53,9 +53,13 @@ func NewGateway(
 		privateKeyBytes, err = os.ReadFile(cfg.PrivateKeyFile)
 	} else {
 		if cfg.AutoGenPrivateKeyPath != "" {
-			privateKeyBytes, _ = os.ReadFile(cfg.AutoGenPrivateKeyPath)
+			if data, readErr := os.ReadFile(cfg.AutoGenPrivateKeyPath); readErr == nil {
+				privateKeyBytes = data
+			} else if !os.IsNotExist(readErr) {
+				err = readErr
+			}
 		}
-		if len(privateKeyBytes) == 0 {
+		if err == nil && len(privateKeyBytes) == 0 {
 			privateKeyBytes, err = transport.NewRandomPrivateKey()
 			if err == nil && cfg.AutoGenPrivateKeyPath != "" {
 				err = os.WriteFile(cfg.AutoGenPrivateKeyPath, privateKeyBytes, 0o600)
@@ -72,13 +76,17 @@ func NewGateway(
 	sshConfig.AddHostKey(privateKey)
 
 	sshConfig.NoClientAuth = cfg.AuthorizedKeysFile == ""
-	sshConfig.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-		authorizedKeysMap, err := loadAuthorizedKeysFromFile(cfg.AuthorizedKeysFile)
-		if err != nil {
-			log.Errorf("load authorized keys file error: %v", err)
-			return nil, fmt.Errorf("internal error")
-		}
 
+	var authorizedKeysMap map[string]string
+	if cfg.AuthorizedKeysFile != "" {
+		loaded, err := loadAuthorizedKeysFromFile(cfg.AuthorizedKeysFile)
+		if err != nil {
+			return nil, err
+		}
+		authorizedKeysMap = loaded
+	}
+
+	sshConfig.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 		user, ok := authorizedKeysMap[string(key.Marshal())]
 		if !ok {
 			return nil, fmt.Errorf("unknown public key for remoteAddr %q", conn.RemoteAddr())

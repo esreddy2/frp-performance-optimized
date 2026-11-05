@@ -618,7 +618,9 @@ func TestV2BinaryUDPPacketReadWriterMixedMessages(t *testing.T) {
 func TestV2BinaryUDPPacketReadWriterRejectsJSONAfterBinaryNegotiation(t *testing.T) {
 	newJSONStream := func() *bytes.Buffer {
 		s := &bytes.Buffer{}
-		require.NoError(t, NewReadWriter(s, wire.ProtocolV2).WriteMsg(&UDPPacket{
+		rw, err := NewReadWriter(s, wire.ProtocolV2)
+		require.NoError(t, err)
+		require.NoError(t, rw.WriteMsg(&UDPPacket{
 			Content:    []byte("x"),
 			RemoteAddr: &net.UDPAddr{IP: net.ParseIP("203.0.113.9"), Port: 54321},
 		}))

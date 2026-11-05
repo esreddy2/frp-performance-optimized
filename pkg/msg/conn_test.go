@@ -38,8 +38,12 @@ func TestConnReadWriteMsg(t *testing.T) {
 			defer client.Close()
 			defer server.Close()
 
-			clientConn := NewConn(client, NewReadWriter(client, tt.protocol))
-			serverConn := NewConn(server, NewReadWriter(server, tt.protocol))
+			clientRW, err := NewReadWriter(client, tt.protocol)
+			require.NoError(t, err)
+			serverRW, err := NewReadWriter(server, tt.protocol)
+			require.NoError(t, err)
+			clientConn := NewConn(client, clientRW)
+			serverConn := NewConn(server, serverRW)
 
 			in := &Ping{PrivilegeKey: "key", Timestamp: 123}
 			errCh := make(chan error, 1)

@@ -177,7 +177,9 @@ func TestV2BinaryUDPPacketReadWriterRoundTripAndCodecInvariant(t *testing.T) {
 		},
 	} {
 		var jsonStream bytes.Buffer
-		require.NoError(t, NewReadWriter(&jsonStream, wire.ProtocolV2).WriteMsg(in))
+		jsonRW, err := NewReadWriter(&jsonStream, wire.ProtocolV2)
+		require.NoError(t, err)
+		require.NoError(t, jsonRW.WriteMsg(in))
 		negotiatedReader, err := NewUDPPacketReadWriter(&jsonStream, wire.ProtocolV2, wire.UDPPacketCodecBinary)
 		require.NoError(t, err)
 		require.ErrorContains(t, read(negotiatedReader), "JSON UDP packet after binary codec negotiation")

@@ -97,11 +97,16 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
 		}
 	}
 
+	readWriter, err := msg.NewReadWriter(controlRW, d.common.Transport.WireProtocol)
+	if err != nil {
+		return nil, err
+	}
+
 	success = true
 	return &SessionContext{
 		Common:         d.common,
 		RunID:          loginRespMsg.RunID,
-		Conn:           msg.NewConn(conn, msg.NewReadWriter(controlRW, d.common.Transport.WireProtocol)),
+		Conn:           msg.NewConn(conn, readWriter),
 		Auth:           d.auth,
 		Connector:      newMessageConnector(connector, d.common.Transport.WireProtocol),
 		VnetController: d.vnetController,

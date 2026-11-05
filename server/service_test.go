@@ -884,7 +884,11 @@ func newControlTestService(t *testing.T) *Service {
 
 func registerLifecycleTestControl(svr *Service) (*Control, *deadlineReadConn, error) {
 	conn := newDeadlineReadConn()
-	msgConn := msg.NewConn(conn, msg.NewReadWriter(conn, wire.ProtocolV1))
+	msgRW, err := msg.NewReadWriter(conn, wire.ProtocolV1)
+	if err != nil {
+		return nil, nil, err
+	}
+	msgConn := msg.NewConn(conn, msgRW)
 	ctl, err := svr.RegisterControl(msgConn, &msg.Login{
 		RunID:    "shared-run",
 		ClientID: "client",

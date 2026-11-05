@@ -40,7 +40,18 @@ func CheckAndEnableTLSServerConnWithTimeout(
 
 	switch {
 	case n == 1 && int(buf[0]) == FRPTLSHeadByte:
-		out = tls.Server(c, tlsConfig)
+		tlsConn := tls.Server(c, tlsConfig)
+		handshakeTimeout := timeout
+		if handshakeTimeout <= 0 {
+			handshakeTimeout = 10 * time.Second
+		}
+		_ = tlsConn.SetDeadline(time.Now().Add(handshakeTimeout))
+		if err = tlsConn.Handshake(); err != nil {
+			tlsConn.Close()
+			return
+		}
+		_ = tlsConn.SetDeadline(time.Time{})
+		out = tlsConn
 		isTLS = true
 		custom = true
 	case n == 1 && int(buf[0]) == 0x16:

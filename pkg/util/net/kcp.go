@@ -37,8 +37,14 @@ func ListenKcp(address string) (l *KCPListener, err error) {
 	if err != nil {
 		return l, err
 	}
-	_ = listener.SetReadBuffer(4194304)
-	_ = listener.SetWriteBuffer(4194304)
+	if err := listener.SetReadBuffer(4194304); err != nil {
+		listener.Close()
+		return nil, err
+	}
+	if err := listener.SetWriteBuffer(4194304); err != nil {
+		listener.Close()
+		return nil, err
+	}
 
 	l = &KCPListener{
 		listener: listener,
@@ -71,8 +77,6 @@ func ListenKcp(address string) (l *KCPListener, err error) {
 					return false
 				case l.acceptCh <- conn:
 					return true
-				default:
-					return false
 				}
 			}
 			if !handoff() {
@@ -84,11 +88,6 @@ func ListenKcp(address string) (l *KCPListener, err error) {
 }
 
 func (l *KCPListener) Accept() (net.Conn, error) {
-	select {
-	case <-l.done:
-		return nil, ErrKCPListenerClosed
-	default:
-	}
 	select {
 	case <-l.done:
 		return nil, ErrKCPListenerClosed

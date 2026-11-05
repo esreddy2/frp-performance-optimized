@@ -18,14 +18,13 @@ import (
 	"fmt"
 	"net"
 	"sync"
-
-	"github.com/fatedier/golib/errors"
 )
 
 // InternalListener is a listener that can be used to accept connections from
 // other goroutines.
 type InternalListener struct {
 	acceptCh chan net.Conn
+	doneCh   chan struct{}
 	closed   bool
 	mu       sync.Mutex
 }
@@ -33,37 +32,46 @@ type InternalListener struct {
 func NewInternalListener() *InternalListener {
 	return &InternalListener{
 		acceptCh: make(chan net.Conn, 128),
+		doneCh:   make(chan struct{}),
 	}
 }
 
 func (l *InternalListener) Accept() (net.Conn, error) {
-	conn, ok := <-l.acceptCh
-	if !ok {
+	select {
+	case conn := <-l.acceptCh:
+		return conn, nil
+	case <-l.doneCh:
 		return nil, fmt.Errorf("listener closed")
 	}
-	return conn, nil
 }
 
 func (l *InternalListener) PutConn(conn net.Conn) error {
-	err := errors.PanicToError(func() {
-		select {
-		case l.acceptCh <- conn:
-		default:
-			conn.Close()
-		}
-	})
-	if err != nil {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		conn.Close()
 		return fmt.Errorf("put conn error: listener is closed")
 	}
-	return nil
+	l.mu.Unlock()
+
+	select {
+	case l.acceptCh <- conn:
+		return nil
+	case <-l.doneCh:
+		conn.Close()
+		return fmt.Errorf("put conn error: listener is closed")
+	default:
+		conn.Close()
+		return nil
+	}
 }
 
 func (l *InternalListener) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.closed {
-		close(l.acceptCh)
 		l.closed = true
+		close(l.doneCh)
 	}
 	return nil
 }

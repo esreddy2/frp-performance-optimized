@@ -222,7 +222,7 @@ func forwarderWithOptions(
 				if err != nil {
 					return
 				}
-				deadline.Refresh()
+				_, _ = deadline.Refresh()
 
 				udpMsg := NewUDPPacket(buf[:n], nil, raddr)
 

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fatedier/frp/pkg/util/util"
@@ -28,6 +29,7 @@ type HTTPAuthMiddleware struct {
 	user          string
 	passwd        string
 	authFailDelay time.Duration
+	mu            sync.Mutex
 }
 
 func NewHTTPAuthMiddleware(user, passwd string) *HTTPAuthMiddleware {
@@ -38,12 +40,17 @@ func NewHTTPAuthMiddleware(user, passwd string) *HTTPAuthMiddleware {
 }
 
 func (authMid *HTTPAuthMiddleware) SetAuthFailDelay(delay time.Duration) *HTTPAuthMiddleware {
+	authMid.mu.Lock()
+	defer authMid.mu.Unlock()
 	authMid.authFailDelay = delay
 	return authMid
 }
 
 func (authMid *HTTPAuthMiddleware) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authMid.mu.Lock()
+		delay := authMid.authFailDelay
+		authMid.mu.Unlock()
 		reqUser, reqPasswd, hasAuth := r.BasicAuth()
 		// Anonymous mode: when no credentials are configured, all requests are
 		// allowed without authentication. This is intentional for deployments
@@ -54,8 +61,8 @@ func (authMid *HTTPAuthMiddleware) Middleware(next http.Handler) http.Handler {
 				util.ConstantTimeEqString(reqPasswd, authMid.passwd)) {
 			next.ServeHTTP(w, r)
 		} else {
-			if authMid.authFailDelay > 0 {
-				time.Sleep(authMid.authFailDelay)
+			if delay > 0 {
+				time.Sleep(delay)
 			}
 			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
@@ -92,4 +99,13 @@ type gzipResponseWriter struct {
 
 func (w gzipResponseWriter) Write(b []byte) (int, error) {
 	return w.Writer.Write(b)
+}
+
+func (w gzipResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	if gz, ok := w.Writer.(*gzip.Writer); ok {
+		_ = gz.Flush()
+	}
 }

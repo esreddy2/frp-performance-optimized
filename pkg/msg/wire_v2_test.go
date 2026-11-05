@@ -41,23 +41,32 @@ func TestV2ReadWriterRoundTrip(t *testing.T) {
 }
 
 func TestNewReadWriter(t *testing.T) {
-	require.IsType(t, &V1ReadWriter{}, NewReadWriter(&bytes.Buffer{}, ""))
-	require.IsType(t, &V1ReadWriter{}, NewReadWriter(&bytes.Buffer{}, wire.ProtocolV1))
-	require.IsType(t, &V1ReadWriter{}, NewReadWriter(&bytes.Buffer{}, "unknown"))
-	require.IsType(t, &V2ReadWriter{}, NewReadWriter(&bytes.Buffer{}, wire.ProtocolV2))
+	rw, err := NewReadWriter(&bytes.Buffer{}, "")
+	require.NoError(t, err)
+	require.IsType(t, &V1ReadWriter{}, rw)
+	rw, err = NewReadWriter(&bytes.Buffer{}, wire.ProtocolV1)
+	require.NoError(t, err)
+	require.IsType(t, &V1ReadWriter{}, rw)
+	_, err = NewReadWriter(&bytes.Buffer{}, "unknown")
+	require.Error(t, err)
+	rw, err = NewReadWriter(&bytes.Buffer{}, wire.ProtocolV2)
+	require.NoError(t, err)
+	require.IsType(t, &V2ReadWriter{}, rw)
 }
 
 func TestNewReadWriterEncoding(t *testing.T) {
 	for _, wireProtocol := range []string{"", wire.ProtocolV1} {
 		var legacy bytes.Buffer
-		legacyRW := NewReadWriter(&legacy, wireProtocol)
+		legacyRW, err := NewReadWriter(&legacy, wireProtocol)
+		require.NoError(t, err)
 		require.NoError(t, legacyRW.WriteMsg(&UDPPacket{Content: []byte("legacy")}))
 		require.NotEmpty(t, legacy.Bytes())
 		require.Equal(t, TypeUDPPacket, legacy.Bytes()[0])
 	}
 
 	var v2 bytes.Buffer
-	v2RW := NewReadWriter(&v2, wire.ProtocolV2)
+	v2RW, err := NewReadWriter(&v2, wire.ProtocolV2)
+	require.NoError(t, err)
 	require.NoError(t, v2RW.WriteMsg(&UDPPacket{Content: []byte("v2")}))
 	frame, err := wire.NewConn(&v2).ReadFrame()
 	require.NoError(t, err)

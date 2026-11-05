@@ -263,7 +263,9 @@ func NewService(cfg *v1.ServerConfig) (svr *Service, err error) {
 	// the svr named return, which is written (set to nil) on error returns.
 	muxer := svr.muxer
 	go func() {
-		_ = muxer.Serve()
+		if err := muxer.Serve(); err != nil {
+			log.Warnf("tcp muxer serve error: %v", err)
+		}
 	}()
 	ln = svr.muxer.DefaultListener()
 
@@ -710,7 +712,11 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 				var controlRW io.ReadWriter
 				controlRW, err = acceptedConn.newControlReadWriter(conn, svr.auth.EncryptionKey(), svr.cfg.Auth.Method, svr.cfg.Transport.RequireKeyShare)
 				if err == nil {
-					controlConn = acceptedConn.messageConnFor(controlRW)
+					var mc *msg.Conn
+					mc, err = acceptedConn.messageConnFor(controlRW)
+					if err == nil {
+						controlConn = mc
+					}
 				}
 			}
 			if err == nil {
@@ -851,8 +857,12 @@ func writeWithDeadline(conn net.Conn, timeout time.Duration, writeFn func() erro
 	return writeFn()
 }
 
-func (ac *acceptedConnection) messageConnFor(rw io.ReadWriter) *msg.Conn {
-	return msg.NewConn(ac.conn, msg.NewReadWriter(rw, ac.wireProtocol))
+func (ac *acceptedConnection) messageConnFor(rw io.ReadWriter) (*msg.Conn, error) {
+	readWriter, err := msg.NewReadWriter(rw, ac.wireProtocol)
+	if err != nil {
+		return nil, err
+	}
+	return msg.NewConn(ac.conn, readWriter), nil
 }
 
 func (ac *acceptedConnection) newControlReadWriter(rw io.ReadWriter, key []byte, authMethod v1.AuthMethod, requireKeyShare bool) (io.ReadWriter, error) {
@@ -871,9 +881,13 @@ func (ac *acceptedConnection) newControlReadWriter(rw io.ReadWriter, key []byte,
 				log.Warnf("client did not offer an X25519 key share; the v2 control channel is not protected against passive observers, upgrade frpc")
 			}
 		}
+		ikm := ac.cryptoContext.DeriveIKM(key)
+		if len(ikm) == 0 {
+			return netpkg.NewCryptoReadWriter(rw, key)
+		}
 		return netpkg.NewAEADCryptoReadWriter(
 			rw,
-			ac.cryptoContext.DeriveIKM(key),
+			ikm,
 			netpkg.AEADCryptoRoleServer,
 			ac.cryptoContext.Algorithm,
 			ac.cryptoContext.TranscriptHash,
@@ -1054,6 +1068,11 @@ func (svr *Service) HandleQUICListener(ctx context.Context, l *quic.Listener) {
 				streamsWG.Add(1)
 				go func(s *quic.Stream) {
 					defer streamsWG.Done()
+					defer func() {
+						if r := recover(); r != nil {
+							log.Errorf("handle quic stream panic: %v", r)
+						}
+					}()
 					svr.handleConnection(ctx, netpkg.QuicStreamToNetConn(s, frpConn), false, nil)
 				}(stream)
 			}

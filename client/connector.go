@@ -17,6 +17,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -70,7 +71,12 @@ func (c *messageConnector) Connect() (*msg.Conn, error) {
 		conn.Close()
 		return nil, err
 	}
-	return msg.NewConn(conn, msg.NewReadWriter(conn, c.wireProtocol)), nil
+	rw, err := msg.NewReadWriter(conn, c.wireProtocol)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return msg.NewConn(conn, rw), nil
 }
 
 func (c *messageConnector) Close() error {
@@ -82,9 +88,9 @@ type defaultConnectorImpl struct {
 	ctx context.Context
 	cfg *v1.ClientCommonConfig
 
+	mu         sync.Mutex
 	muxSession *fmux.Session
 	quicConn   *quic.Conn
-	closeOnce  sync.Once
 }
 
 func NewConnector(ctx context.Context, cfg *v1.ClientCommonConfig) Connector {
@@ -122,10 +128,19 @@ func (c *defaultConnectorImpl) clientTLSConfig() (*tls.Config, error) {
 // After the underlying connection is established, you can call Connect() to get a stream.
 // If TCPMux isn't enabled, the underlying connection is nil, you will get a new real TCP connection every time you call Connect().
 func (c *defaultConnectorImpl) Open() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	xl := xlog.FromContextSafe(c.ctx)
 
 	// special for quic
 	if strings.EqualFold(c.cfg.Transport.Protocol, "quic") {
+		// Close any previously opened QUIC connection before replacing it.
+		if c.quicConn != nil {
+			_ = c.quicConn.CloseWithError(0, "")
+			c.quicConn = nil
+		}
+
 		tlsConfig, err := c.clientTLSConfig()
 		if err != nil {
 			xl.Warnf("fail to build tls configuration, err: %v", err)
@@ -163,8 +178,47 @@ func (c *defaultConnectorImpl) Open() error {
 			quicConfig.TokenStore = quic.NewLRUTokenStore(100, 10)
 		}
 		serverAddr := net.JoinHostPort(c.cfg.ServerAddr, strconv.Itoa(c.cfg.ServerPort))
+
+		dialTimeout := time.Duration(c.cfg.Transport.DialServerTimeout) * time.Second
+		dialCtx := c.ctx
+		var cancel context.CancelFunc
+		if dialTimeout > 0 {
+			dialCtx, cancel = context.WithTimeout(c.ctx, dialTimeout)
+		}
+		if cancel != nil {
+			defer cancel()
+		}
+
+		if localIP := c.cfg.Transport.ConnectServerLocalIP; localIP != "" {
+			ip := net.ParseIP(localIP)
+			if ip == nil {
+				return fmt.Errorf("invalid ConnectServerLocalIP %q", localIP)
+			}
+			udpAddr, err := net.ResolveUDPAddr("udp", serverAddr)
+			if err != nil {
+				return fmt.Errorf("resolve quic server %s: %w", serverAddr, err)
+			}
+			udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: 0})
+			if err != nil {
+				return fmt.Errorf("bind quic local address %s: %w", localIP, err)
+			}
+			tr := &quic.Transport{Conn: udpConn}
+			conn, err := tr.Dial(dialCtx, udpAddr, tlsConfig, quicConfig)
+			if err != nil {
+				tr.Close()
+				return fmt.Errorf("dial quic server %s: %w (the server must listen for quic on udp port %d: set quicBindPort in the server config)",
+					serverAddr, err, c.cfg.ServerPort)
+			}
+			go func() {
+				<-conn.Context().Done()
+				_ = udpConn.Close()
+			}()
+			c.quicConn = conn
+			return nil
+		}
+
 		conn, err := quic.DialAddr(
-			c.ctx,
+			dialCtx,
 			serverAddr,
 			tlsConfig, quicConfig)
 		if err != nil {
@@ -173,6 +227,12 @@ func (c *defaultConnectorImpl) Open() error {
 		}
 		c.quicConn = conn
 		return nil
+	}
+
+	// Close any previously created yamux session before replacing it.
+	if c.muxSession != nil {
+		_ = c.muxSession.Close()
+		c.muxSession = nil
 	}
 
 	if !lo.FromPtr(c.cfg.Transport.TCPMux) {
@@ -200,14 +260,19 @@ func (c *defaultConnectorImpl) Open() error {
 
 // Connect returns a stream from the underlying connection, or a new TCP connection if TCPMux isn't enabled.
 func (c *defaultConnectorImpl) Connect() (net.Conn, error) {
-	if c.quicConn != nil {
-		stream, err := c.quicConn.OpenStreamSync(c.ctx)
+	c.mu.Lock()
+	quicConn := c.quicConn
+	muxSession := c.muxSession
+	c.mu.Unlock()
+
+	if quicConn != nil {
+		stream, err := quicConn.OpenStreamSync(c.ctx)
 		if err != nil {
 			return nil, err
 		}
-		return netpkg.QuicStreamToNetConn(stream, c.quicConn), nil
-	} else if c.muxSession != nil {
-		stream, err := c.muxSession.OpenStream()
+		return netpkg.QuicStreamToNetConn(stream, quicConn), nil
+	} else if muxSession != nil {
+		stream, err := muxSession.OpenStream()
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +292,7 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 
 	proxyType, addr, auth, err := libnet.ParseProxyURL(c.cfg.Transport.ProxyURL)
 	if err != nil {
-		xl.Errorf("fail to parse proxy url")
+		xl.Errorf("fail to parse proxy url: %v", err)
 		return nil, err
 	}
 	dialOptions := []libnet.DialOption{}
@@ -235,7 +300,7 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 	switch protocol {
 	case "websocket":
 		protocol = "tcp"
-		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{Hook: netpkg.DialHookWebsocket(protocol, "")}))
+		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{Hook: netpkg.DialHookWebsocket(protocol, ""), Priority: 15}))
 		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{
 			Hook: netpkg.DialHookCustomTLSHeadByte(tlsConfig != nil, lo.FromPtr(c.cfg.Transport.TLS.DisableCustomTLSFirstByte)),
 		}))
@@ -269,21 +334,38 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 	)
 	if err == nil {
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			_ = tcpConn.SetNoDelay(true)
-			_ = applyTCPSendQueueOpts(tcpConn, c.cfg.Transport.TCPNotSentLowat, c.cfg.Transport.TCPSendBuffer)
+			if derr := tcpConn.SetNoDelay(true); derr != nil {
+				conn.Close()
+				return nil, fmt.Errorf("set tcp no delay: %w", derr)
+			}
+			if toptErr := applyTCPSendQueueOpts(tcpConn, c.cfg.Transport.TCPNotSentLowat, c.cfg.Transport.TCPSendBuffer); toptErr != nil {
+				conn.Close()
+				return nil, fmt.Errorf("apply tcp send queue options: %w", toptErr)
+			}
 		}
 	}
 	return conn, err
 }
 
 func (c *defaultConnectorImpl) Close() error {
-	c.closeOnce.Do(func() {
-		if c.quicConn != nil {
-			_ = c.quicConn.CloseWithError(0, "")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var errs []error
+	if c.quicConn != nil {
+		if err := c.quicConn.CloseWithError(0, ""); err != nil {
+			errs = append(errs, err)
 		}
-		if c.muxSession != nil {
-			_ = c.muxSession.Close()
+		c.quicConn = nil
+	}
+	if c.muxSession != nil {
+		if err := c.muxSession.Close(); err != nil {
+			errs = append(errs, err)
 		}
-	})
+		c.muxSession = nil
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
 	return nil
 }

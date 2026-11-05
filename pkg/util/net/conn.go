@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -57,6 +58,7 @@ func NewContextFromConn(conn net.Conn) context.Context {
 type ContextConn struct {
 	net.Conn
 
+	mu  sync.Mutex
 	ctx context.Context
 }
 
@@ -68,10 +70,14 @@ func NewContextConn(ctx context.Context, c net.Conn) *ContextConn {
 }
 
 func (c *ContextConn) WithContext(ctx context.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.ctx = ctx
 }
 
 func (c *ContextConn) Context() context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.ctx
 }
 
@@ -80,6 +86,7 @@ type WrapReadWriteCloserConn struct {
 
 	underConn net.Conn
 
+	mu         sync.Mutex
 	remoteAddr net.Addr
 }
 
@@ -98,15 +105,22 @@ func (conn *WrapReadWriteCloserConn) LocalAddr() net.Addr {
 }
 
 func (conn *WrapReadWriteCloserConn) SetRemoteAddr(addr net.Addr) {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
 	conn.remoteAddr = addr
 }
 
 func (conn *WrapReadWriteCloserConn) RemoteAddr() net.Addr {
-	if conn.remoteAddr != nil {
-		return conn.remoteAddr
+	conn.mu.Lock()
+	remoteAddr := conn.remoteAddr
+	underConn := conn.underConn
+	conn.mu.Unlock()
+
+	if remoteAddr != nil {
+		return remoteAddr
 	}
-	if conn.underConn != nil {
-		return conn.underConn.RemoteAddr()
+	if underConn != nil {
+		return underConn.RemoteAddr()
 	}
 	return (*net.TCPAddr)(nil)
 }
@@ -154,7 +168,8 @@ func (cc *CloseNotifyConn) Close() (err error) {
 	if pflag == 0 {
 		err = cc.Conn.Close()
 		if cc.closeFn != nil {
-			cc.closeFn(nil)
+			closeFn := cc.closeFn
+			go closeFn(nil)
 		}
 	}
 	return
@@ -166,7 +181,8 @@ func (cc *CloseNotifyConn) CloseWithError(err error) error {
 	if pflag == 0 {
 		closeErr := cc.Conn.Close()
 		if cc.closeFn != nil {
-			cc.closeFn(err)
+			closeFn := cc.closeFn
+			go closeFn(err)
 		}
 		return closeErr
 	}
@@ -177,8 +193,8 @@ type StatsConn struct {
 	net.Conn
 
 	closed     atomic.Int64 // 1 means closed
-	totalRead  int64
-	totalWrite int64
+	totalRead  atomic.Int64
+	totalWrite atomic.Int64
 	statsFunc  func(totalRead, totalWrite int64)
 }
 
@@ -191,13 +207,13 @@ func WrapStatsConn(conn net.Conn, statsFunc func(total, totalWrite int64)) *Stat
 
 func (statsConn *StatsConn) Read(p []byte) (n int, err error) {
 	n, err = statsConn.Conn.Read(p)
-	statsConn.totalRead += int64(n)
+	statsConn.totalRead.Add(int64(n))
 	return
 }
 
 func (statsConn *StatsConn) Write(p []byte) (n int, err error) {
 	n, err = statsConn.Conn.Write(p)
-	statsConn.totalWrite += int64(n)
+	statsConn.totalWrite.Add(int64(n))
 	return
 }
 
@@ -206,7 +222,7 @@ func (statsConn *StatsConn) Close() (err error) {
 	if old != 1 {
 		err = statsConn.Conn.Close()
 		if statsConn.statsFunc != nil {
-			statsConn.statsFunc(statsConn.totalRead, statsConn.totalWrite)
+			statsConn.statsFunc(statsConn.totalRead.Load(), statsConn.totalWrite.Load())
 		}
 	}
 	return
@@ -215,6 +231,10 @@ func (statsConn *StatsConn) Close() (err error) {
 type wrapQuicStream struct {
 	*quic.Stream
 	c *quic.Conn
+
+	closeOnce sync.Once
+	closeMu   sync.Mutex
+	closeErr  error
 }
 
 func QuicStreamToNetConn(s *quic.Stream, c *quic.Conn) net.Conn {
@@ -239,8 +259,13 @@ func (conn *wrapQuicStream) RemoteAddr() net.Addr {
 }
 
 func (conn *wrapQuicStream) Close() error {
-	conn.CancelRead(0)
-	return conn.Stream.Close()
+	conn.closeMu.Lock()
+	defer conn.closeMu.Unlock()
+	conn.closeOnce.Do(func() {
+		conn.CancelRead(0)
+		conn.closeErr = conn.Stream.Close()
+	})
+	return conn.closeErr
 }
 
 func (conn *wrapQuicStream) GetQuicConn() *quic.Conn {
@@ -250,7 +275,13 @@ func (conn *wrapQuicStream) GetQuicConn() *quic.Conn {
 // GetQuicConnFromNetConn extracts the QUIC connection from a net.Conn if it wraps a QUIC stream.
 // It unwraps through common wrapper types: msg.Conn, ContextConn, WrapReadWriteCloserConn.
 func GetQuicConnFromNetConn(conn net.Conn) *quic.Conn {
-	for {
+	seen := make(map[net.Conn]struct{})
+	for conn != nil {
+		if _, ok := seen[conn]; ok {
+			return nil
+		}
+		seen[conn] = struct{}{}
+
 		switch c := conn.(type) {
 		case *wrapQuicStream:
 			return c.GetQuicConn()
@@ -258,13 +289,17 @@ func GetQuicConnFromNetConn(conn net.Conn) *quic.Conn {
 			conn = c.Conn
 		case *WrapReadWriteCloserConn:
 			conn = c.underConn
+		case *StatsConn:
+			conn = c.Conn
+		case *CloseNotifyConn:
+			conn = c.Conn
 		default:
 			// Try to unwrap via embedded net.Conn field (e.g., msg.Conn)
 			if v := reflect.ValueOf(conn); v.Kind() == reflect.Pointer {
 				elem := v.Elem()
 				if elem.Kind() == reflect.Struct {
 					if f := elem.FieldByName("Conn"); f.IsValid() && f.CanInterface() {
-						if next, ok := f.Interface().(net.Conn); ok && next != nil {
+						if next, ok := f.Interface().(net.Conn); ok && next != nil && next != conn {
 							conn = next
 							continue
 						}
@@ -274,6 +309,7 @@ func GetQuicConnFromNetConn(conn net.Conn) *quic.Conn {
 			return nil
 		}
 	}
+	return nil
 }
 
 func NewCryptoReadWriter(rw io.ReadWriter, key []byte) (io.ReadWriter, error) {
@@ -357,6 +393,9 @@ func NewAEADCryptoReadWriter(
 }
 
 func deriveAEADControlKeys(key []byte, algorithm string, transcriptHash []byte) (clientToServerKey, serverToClientKey []byte, err error) {
+	if len(transcriptHash) == 0 {
+		return nil, nil, errors.New("empty transcript hash")
+	}
 	clientToServerKey, err = deriveAEADControlKey(key, algorithm, transcriptHash, aeadDirectionClientToServer)
 	if err != nil {
 		return nil, nil, err

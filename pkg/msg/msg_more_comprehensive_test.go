@@ -161,10 +161,17 @@ func TestV1ReadWriterRoundTrip(t *testing.T) {
 }
 
 func TestNewReadWriterMore(t *testing.T) {
-	require.IsType(t, &V1ReadWriter{}, NewReadWriter(&bytes.Buffer{}, ""))
-	require.IsType(t, &V1ReadWriter{}, NewReadWriter(&bytes.Buffer{}, wire.ProtocolV1))
-	require.IsType(t, &V1ReadWriter{}, NewReadWriter(&bytes.Buffer{}, "unknown"))
-	require.IsType(t, &V2ReadWriter{}, NewReadWriter(&bytes.Buffer{}, wire.ProtocolV2))
+	rw, err := NewReadWriter(&bytes.Buffer{}, "")
+	require.NoError(t, err)
+	require.IsType(t, &V1ReadWriter{}, rw)
+	rw, err = NewReadWriter(&bytes.Buffer{}, wire.ProtocolV1)
+	require.NoError(t, err)
+	require.IsType(t, &V1ReadWriter{}, rw)
+	_, err = NewReadWriter(&bytes.Buffer{}, "unknown")
+	require.Error(t, err)
+	rw, err = NewReadWriter(&bytes.Buffer{}, wire.ProtocolV2)
+	require.NoError(t, err)
+	require.IsType(t, &V2ReadWriter{}, rw)
 }
 
 func TestNewV2ReadWriterWithConn(t *testing.T) {

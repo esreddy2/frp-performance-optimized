@@ -86,7 +86,11 @@ func (pxy *XTCPProxy) Run() (remoteAddr string, err error) {
 }
 
 func writeNatHoleSid(workConn net.Conn, wireProtocol string, sid string) error {
-	workMsgConn := msg.NewConn(workConn, msg.NewReadWriter(workConn, wireProtocol))
+	rw, err := msg.NewReadWriter(workConn, wireProtocol)
+	if err != nil {
+		return err
+	}
+	workMsgConn := msg.NewConn(workConn, rw)
 	return workMsgConn.WriteMsg(&msg.NatHoleSid{
 		Sid: sid,
 	})

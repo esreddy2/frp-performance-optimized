@@ -152,7 +152,16 @@ func (s *TunnelServer) Run() error {
 			if err != nil {
 				return
 			}
-			_ = s.peerServerListener.PutConn(conn)
+			select {
+			case <-s.doneCh:
+				conn.Close()
+				return
+			default:
+			}
+			if err := s.peerServerListener.PutConn(conn); err != nil {
+				log.Warnf("put conn to peer server listener error: %v", err)
+				conn.Close()
+			}
 		}
 	}()
 	xl := xlog.New().AddPrefix(xlog.LogPrefix{Name: "sshVirtualClient", Value: "sshVirtualClient", Priority: 100})
@@ -207,30 +216,52 @@ func (s *TunnelServer) waitForwardAddrAndExtraPayload(
 ) (*tcpipForward, string, error) {
 	addrCh := make(chan *tcpipForward, 1)
 	extraPayloadCh := make(chan string, 1)
+	done := make(chan struct{})
+	defer close(done)
 
 	// get forward address
 	go func() {
 		addrGot := false
-		for req := range requests {
-			if req.Type == RequestTypeForward && !addrGot {
-				payload := tcpipForward{}
-				if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+		for {
+			select {
+			case req, ok := <-requests:
+				if !ok {
 					return
 				}
-				addrGot = true
-				addrCh <- &payload
-			}
-			if req.WantReply {
-				_ = req.Reply(true, nil)
+				if req.Type == RequestTypeForward && !addrGot {
+					payload := tcpipForward{}
+					if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+						return
+					}
+					addrGot = true
+					select {
+					case addrCh <- &payload:
+					case <-done:
+						return
+					}
+				}
+				if req.WantReply {
+					_ = req.Reply(true, nil)
+				}
+			case <-done:
+				return
 			}
 		}
 	}()
 
 	// get extra payload
 	go func() {
-		for newChannel := range channels {
-			// extraPayload will send to extraPayloadCh
-			go s.handleNewChannel(newChannel, extraPayloadCh)
+		for {
+			select {
+			case newChannel, ok := <-channels:
+				if !ok {
+					return
+				}
+				// extraPayload will send to extraPayloadCh
+				go s.handleNewChannel(newChannel, extraPayloadCh)
+			case <-done:
+				return
+			}
 		}
 	}()
 
@@ -310,9 +341,9 @@ func (s *TunnelServer) handleNewChannel(channel ssh.NewChannel, extraPayloadCh c
 	s.firstChannelMu.Lock()
 	if s.firstChannel == nil {
 		s.firstChannel = ch
+		go s.keepAlive(ch)
 	}
 	s.firstChannelMu.Unlock()
-	go s.keepAlive(ch)
 
 	for req := range reqs {
 		if req.WantReply {

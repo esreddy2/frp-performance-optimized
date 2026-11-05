@@ -24,16 +24,28 @@ import (
 
 func BuildProxyProtocolHeaderStruct(srcAddr, dstAddr net.Addr, version string) *pp.Header {
 	var versionByte byte
-	if version == "v1" {
+	switch version {
+	case "v1":
 		versionByte = 1
-	} else {
+	case "v2", "":
 		versionByte = 2 // default to v2
+	default:
+		return nil
 	}
-	return pp.HeaderProxyFromAddrs(versionByte, srcAddr, dstAddr)
+	h := pp.HeaderProxyFromAddrs(versionByte, srcAddr, dstAddr)
+	// Reject no-op headers produced for nil or unsupported/mismatched
+	// addresses so callers can distinguish a real proxy header.
+	if h == nil || h.Command != pp.PROXY {
+		return nil
+	}
+	return h
 }
 
 func BuildProxyProtocolHeader(srcAddr, dstAddr net.Addr, version string) ([]byte, error) {
 	h := BuildProxyProtocolHeaderStruct(srcAddr, dstAddr, version)
+	if h == nil {
+		return nil, fmt.Errorf("invalid proxy protocol version or addresses: version=%q", version)
+	}
 
 	// Convert header to bytes using a buffer
 	var buf bytes.Buffer

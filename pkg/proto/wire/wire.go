@@ -100,7 +100,10 @@ func (c *Conn) WriteFrame(f *Frame) error {
 	binary.BigEndian.PutUint16(buf[2:4], f.Flags)
 	binary.BigEndian.PutUint32(buf[4:8], uint32(len(f.Payload)))
 	copy(buf[8:], f.Payload)
-	_, err := c.rw.Write(buf)
+	n, err := c.rw.Write(buf)
+	if err == nil && n != len(buf) {
+		err = io.ErrShortWrite
+	}
 	return err
 }
 

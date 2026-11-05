@@ -106,6 +106,9 @@ func DialUDPTransparent(
 		return nil, errors.New("destination address cannot be nil")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	dialer := &net.Dialer{
 		LocalAddr: localAddr,
 		Control: func(network, address string, c syscall.RawConn) error {
@@ -121,15 +124,15 @@ func DialUDPTransparent(
 		},
 	}
 
-	c, err := dialer.Dial("udp", dstAddr.String())
-	if err != nil && localAddr != nil && localAddr.Port != 0 {
+	c, err := dialer.DialContext(ctx, "udp", dstAddr.String())
+	if err != nil && localAddr != nil && localAddr.Port != 0 && isAddrInUse(err) {
 		fallbackAddr := &net.UDPAddr{
 			IP:   localAddr.IP,
 			Port: 0,
 			Zone: localAddr.Zone,
 		}
 		dialer.LocalAddr = fallbackAddr
-		c, err = dialer.Dial("udp", dstAddr.String())
+		c, err = dialer.DialContext(ctx, "udp", dstAddr.String())
 	}
 	if err != nil {
 		return nil, err
@@ -150,12 +153,13 @@ func CheckTransparentSupport(localIP string) ([]string, error) {
 
 	// 1. Check capability by testing IP_TRANSPARENT setsockopt on a dummy socket
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
-	if err == nil {
-		defer unix.Close(fd)
-		if optErr := unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_TRANSPARENT, 1); optErr != nil {
-			if errors.Is(optErr, syscall.EPERM) {
-				return nil, fmt.Errorf("transparent proxying requires CAP_NET_ADMIN capability: %w", optErr)
-			}
+	if err != nil {
+		return nil, fmt.Errorf("transparent proxying socket probe failed: %w", err)
+	}
+	defer unix.Close(fd)
+	if optErr := unix.SetsockoptInt(fd, unix.SOL_IP, unix.IP_TRANSPARENT, 1); optErr != nil {
+		if errors.Is(optErr, syscall.EPERM) {
+			return nil, fmt.Errorf("transparent proxying requires CAP_NET_ADMIN capability: %w", optErr)
 		}
 	}
 
@@ -178,6 +182,10 @@ func CheckTransparentSupport(localIP string) ([]string, error) {
 	}
 
 	return warnings, nil
+}
+
+func isAddrInUse(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
 }
 
 func readSysctl(path string) (string, error) {

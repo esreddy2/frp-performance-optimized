@@ -16,6 +16,7 @@ package net
 
 import (
 	"net"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,7 @@ import (
 type IdleReadDeadline struct {
 	conn    net.Conn
 	timeout time.Duration
+	mu      sync.Mutex
 	current time.Time
 }
 
@@ -51,21 +53,33 @@ func NewIdleReadDeadline(conn net.Conn, timeout time.Duration) *IdleReadDeadline
 
 // Refresh pushes the read deadline forward when it is at least half way to
 // its expiry. It reports whether the deadline was moved.
-func (d *IdleReadDeadline) Refresh() bool {
+func (d *IdleReadDeadline) Refresh() (bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	now := time.Now()
 	// Push the deadline forward once at least a quarter of the timeout has
 	// elapsed (i.e. remaining time is <= 3/4 timeout). This ensures that
 	// periodic heartbeats arriving near the half-window (timeout/2) do not
 	// get skipped due to sub-millisecond scheduling or network jitter.
 	if now.Add(d.timeout * 3 / 4).Before(d.current) {
-		return false
+		return false, nil
 	}
-	d.current = now.Add(d.timeout)
-	_ = d.conn.SetReadDeadline(d.current)
-	return true
+	newDeadline := now.Add(d.timeout)
+	if err := d.conn.SetReadDeadline(newDeadline); err != nil {
+		return false, err
+	}
+	d.current = newDeadline
+	return true, nil
 }
 
 // Clear removes the read deadline.
-func (d *IdleReadDeadline) Clear() {
-	_ = d.conn.SetReadDeadline(time.Time{})
+func (d *IdleReadDeadline) Clear() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.conn.SetReadDeadline(time.Time{}); err != nil {
+		return err
+	}
+	d.current = time.Time{}
+	return nil
 }

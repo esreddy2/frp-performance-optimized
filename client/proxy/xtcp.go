@@ -135,7 +135,11 @@ func (pxy *XTCPProxy) InWorkConn(conn net.Conn, startWorkConnMsg *msg.StartWorkC
 }
 
 func readNatHoleSid(conn net.Conn, wireProtocol string) (*msg.NatHoleSid, error) {
-	workMsgConn := msg.NewConn(conn, msg.NewReadWriter(conn, wireProtocol))
+	rw, err := msg.NewReadWriter(conn, wireProtocol)
+	if err != nil {
+		return nil, err
+	}
+	workMsgConn := msg.NewConn(conn, rw)
 	var natHoleSidMsg msg.NatHoleSid
 	if err := workMsgConn.ReadMsgInto(&natHoleSidMsg); err != nil {
 		return nil, err

@@ -174,7 +174,7 @@ func readUDPWorkConn(
 	xl *xlog.Logger,
 ) {
 	deadline := netpkg.NewIdleReadDeadline(payloadConn, idleTimeout)
-	defer deadline.Clear()
+	defer func() { _ = deadline.Clear() }()
 
 	for {
 		xl.Tracef("loop waiting message from udp workConn")
@@ -188,7 +188,7 @@ func readUDPWorkConn(
 			_ = liberrors.PanicToError(onClosed)
 			return
 		}
-		deadline.Refresh()
+		_, _ = deadline.Refresh()
 		switch m := rawMsg.(type) {
 		case *msg.Ping:
 			xl.Tracef("udp work conn get ping message")

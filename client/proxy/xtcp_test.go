@@ -44,7 +44,12 @@ func TestReadNatHoleSidUsesSelectedWireProtocol(t *testing.T) {
 
 			errCh := make(chan error, 1)
 			go func() {
-				writer := msg.NewConn(server, msg.NewReadWriter(server, tc.wireProtocol))
+				writerRW, err := msg.NewReadWriter(server, tc.wireProtocol)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				writer := msg.NewConn(server, writerRW)
 				errCh <- writer.WriteMsg(&msg.NatHoleSid{Sid: "sid"})
 			}()
 

@@ -51,21 +51,28 @@ func TestBuildProxyProtocolHeader(t *testing.T) {
 			srcAddr:     nil,
 			dstAddr:     &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3306},
 			version:     "v2",
-			expectError: false,
+			expectError: true,
 		},
 		{
 			name:        "nil destination address",
 			srcAddr:     &net.TCPAddr{IP: net.ParseIP("192.168.1.100"), Port: 12345},
 			dstAddr:     nil,
 			version:     "v2",
-			expectError: false,
+			expectError: true,
 		},
 		{
 			name:        "unsupported address type",
 			srcAddr:     &net.UnixAddr{Name: "/tmp/test.sock", Net: "unix"},
 			dstAddr:     &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3306},
 			version:     "v2",
-			expectError: false,
+			expectError: true,
+		},
+		{
+			name:        "invalid version",
+			srcAddr:     &net.TCPAddr{IP: net.ParseIP("192.168.1.100"), Port: 12345},
+			dstAddr:     &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 80},
+			version:     "foo",
+			expectError: true,
 		},
 	}
 
@@ -95,6 +102,7 @@ func TestBuildProxyProtocolHeaderStruct(t *testing.T) {
 		expectedCommand    pp.ProtocolVersionAndCommand
 		expectedSourceAddr net.Addr
 		expectedDestAddr   net.Addr
+		expectNil          bool
 	}{
 		{
 			name:               "TCP IPv4 v2",
@@ -130,42 +138,42 @@ func TestBuildProxyProtocolHeaderStruct(t *testing.T) {
 			expectedDestAddr:   &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 80},
 		},
 		{
-			name:               "nil source address",
-			srcAddr:            nil,
-			dstAddr:            &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3306},
-			version:            "v2",
-			expectedProtocol:   pp.UNSPEC,
-			expectedVersion:    2,
-			expectedCommand:    pp.LOCAL,
-			expectedSourceAddr: nil, // go-proxyproto sets both to nil when srcAddr is nil
-			expectedDestAddr:   nil,
+			name:      "nil source address",
+			srcAddr:   nil,
+			dstAddr:   &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3306},
+			version:   "v2",
+			expectNil: true,
 		},
 		{
-			name:               "nil destination address",
-			srcAddr:            &net.TCPAddr{IP: net.ParseIP("192.168.1.100"), Port: 12345},
-			dstAddr:            nil,
-			version:            "v2",
-			expectedProtocol:   pp.UNSPEC,
-			expectedVersion:    2,
-			expectedCommand:    pp.LOCAL,
-			expectedSourceAddr: nil, // go-proxyproto sets both to nil when dstAddr is nil
-			expectedDestAddr:   nil,
+			name:      "nil destination address",
+			srcAddr:   &net.TCPAddr{IP: net.ParseIP("192.168.1.100"), Port: 12345},
+			dstAddr:   nil,
+			version:   "v2",
+			expectNil: true,
 		},
 		{
-			name:               "unsupported address type",
-			srcAddr:            &net.UnixAddr{Name: "/tmp/test.sock", Net: "unix"},
-			dstAddr:            &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3306},
-			version:            "v2",
-			expectedProtocol:   pp.UNSPEC,
-			expectedVersion:    2,
-			expectedCommand:    pp.LOCAL,
-			expectedSourceAddr: nil, // go-proxyproto sets both to nil for unsupported types
-			expectedDestAddr:   nil,
+			name:      "unsupported address type",
+			srcAddr:   &net.UnixAddr{Name: "/tmp/test.sock", Net: "unix"},
+			dstAddr:   &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3306},
+			version:   "v2",
+			expectNil: true,
+		},
+		{
+			name:      "invalid version",
+			srcAddr:   &net.TCPAddr{IP: net.ParseIP("192.168.1.100"), Port: 12345},
+			dstAddr:   &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 80},
+			version:   "foo",
+			expectNil: true,
 		},
 	}
 
 	for _, tt := range tests {
 		header := BuildProxyProtocolHeaderStruct(tt.srcAddr, tt.dstAddr, tt.version)
+
+		if tt.expectNil {
+			require.Nil(header, "test case: %s", tt.name)
+			continue
+		}
 
 		require.NotNil(header, "test case: %s", tt.name)
 

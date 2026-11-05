@@ -41,6 +41,12 @@ type FakeUDPConn struct {
 
 	lastActive time.Time
 	mu         sync.RWMutex
+
+	accepted bool
+	notified bool
+
+	idleMu    sync.Mutex
+	idleTimer *time.Timer
 }
 
 func NewFakeUDPConn(l *UDPListener, laddr, raddr net.Addr) *FakeUDPConn {
@@ -50,35 +56,61 @@ func NewFakeUDPConn(l *UDPListener, laddr, raddr net.Addr) *FakeUDPConn {
 		remoteAddr: raddr,
 		packets:    make(chan []byte, 20),
 	}
-
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			fc.mu.RLock()
-			closed := fc.closeFlag
-			idle := time.Since(fc.lastActive) > 10*time.Second
-			fc.mu.RUnlock()
-			if closed {
-				return
-			}
-			if idle {
-				fc.Close()
-				return
-			}
-		}
-	}()
+	fc.lastActive = time.Now()
+	fc.resetIdleTimer()
 	return fc
 }
 
+func (c *FakeUDPConn) resetIdleTimer() {
+	c.idleMu.Lock()
+	defer c.idleMu.Unlock()
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+	}
+	c.idleTimer = time.AfterFunc(10*time.Second, func() {
+		c.Close()
+	})
+}
+
+func (c *FakeUDPConn) stopIdleTimer() {
+	c.idleMu.Lock()
+	defer c.idleMu.Unlock()
+	if c.idleTimer != nil {
+		c.idleTimer.Stop()
+		c.idleTimer = nil
+	}
+}
+
+func (c *FakeUDPConn) touch() {
+	c.mu.Lock()
+	if c.closeFlag {
+		c.mu.Unlock()
+		return
+	}
+	c.lastActive = time.Now()
+	c.mu.Unlock()
+	c.resetIdleTimer()
+}
+
 func (c *FakeUDPConn) putPacket(content []byte) {
+	c.mu.RLock()
+	closed := c.closeFlag
+	c.mu.RUnlock()
+	if closed {
+		pool.PutBuf(content)
+		return
+	}
+
 	defer func() {
-		_ = recover()
+		if r := recover(); r != nil {
+			pool.PutBuf(content)
+		}
 	}()
 
 	select {
 	case c.packets <- content:
 	default:
+		pool.PutBuf(content)
 	}
 }
 
@@ -87,12 +119,11 @@ func (c *FakeUDPConn) Read(b []byte) (n int, err error) {
 	if !ok {
 		return 0, io.EOF
 	}
-	c.mu.Lock()
-	c.lastActive = time.Now()
-	c.mu.Unlock()
+	c.touch()
 
 	n = min(len(b), len(content))
 	copy(b, content)
+	pool.PutBuf(content)
 	return n, nil
 }
 
@@ -104,16 +135,20 @@ func (c *FakeUDPConn) Write(b []byte) (n int, err error) {
 	}
 	c.mu.RUnlock()
 
+	buf := pool.GetBuf(len(b))
+	copy(buf, b)
+
 	packet := &UDPPacket{
-		Buf:        b,
+		Buf:        buf,
 		LocalAddr:  c.localAddr,
 		RemoteAddr: c.remoteAddr,
 	}
-	_ = c.l.writeUDPPacket(packet)
+	if err := c.l.writeUDPPacket(packet); err != nil {
+		pool.PutBuf(buf)
+		return 0, err
+	}
 
-	c.mu.Lock()
-	c.lastActive = time.Now()
-	c.mu.Unlock()
+	c.touch()
 	return len(b), nil
 }
 
@@ -121,9 +156,16 @@ func (c *FakeUDPConn) Close() error {
 	c.mu.Lock()
 	if !c.closeFlag {
 		c.closeFlag = true
-		close(c.packets)
+		func() {
+			defer func() {
+				_ = recover()
+			}()
+			close(c.packets)
+		}()
 	}
 	c.mu.Unlock()
+
+	c.stopIdleTimer()
 
 	if c.l != nil {
 		c.l.mu.Lock()
@@ -137,6 +179,30 @@ func (c *FakeUDPConn) IsClosed() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.closeFlag
+}
+
+func (c *FakeUDPConn) IsAccepted() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.accepted
+}
+
+func (c *FakeUDPConn) isNotified() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.notified
+}
+
+func (c *FakeUDPConn) setNotified(v bool) {
+	c.mu.Lock()
+	c.notified = v
+	c.mu.Unlock()
+}
+
+func (c *FakeUDPConn) markAccepted() {
+	c.mu.Lock()
+	c.accepted = true
+	c.mu.Unlock()
 }
 
 func (c *FakeUDPConn) LocalAddr() net.Addr {
@@ -166,6 +232,7 @@ type UDPListener struct {
 	readConn  net.Conn
 	closeFlag bool
 	mu        sync.Mutex
+	closeOnce sync.Once
 
 	fakeConns map[string]*FakeUDPConn
 }
@@ -182,7 +249,7 @@ func ListenUDP(bindAddr string, bindPort int) (l *UDPListener, err error) {
 
 	l = &UDPListener{
 		addr:      udpAddr,
-		acceptCh:  make(chan net.Conn),
+		acceptCh:  make(chan net.Conn, 1024),
 		writeCh:   make(chan *UDPPacket, 1000),
 		readConn:  readConn,
 		fakeConns: make(map[string]*FakeUDPConn),
@@ -194,23 +261,37 @@ func ListenUDP(bindAddr string, bindPort int) (l *UDPListener, err error) {
 			buf := pool.GetBuf(1450)
 			n, remoteAddr, err := readConn.ReadFromUDP(buf)
 			if err != nil {
-				close(l.acceptCh)
-				close(l.writeCh)
+				pool.PutBuf(buf)
+				l.mu.Lock()
+				if !l.closeFlag {
+					l.closeFlag = true
+				}
+				l.mu.Unlock()
+				l.closeChannels()
 				return
 			}
 
 			l.mu.Lock()
+			if l.closeFlag {
+				l.mu.Unlock()
+				pool.PutBuf(buf)
+				continue
+			}
 			fakeConn, exist := l.fakeConns[remoteAddr.String()]
 			if !exist || fakeConn.IsClosed() {
 				fakeConn = NewFakeUDPConn(l, l.Addr(), remoteAddr)
 				l.fakeConns[remoteAddr.String()] = fakeConn
 			}
 			l.mu.Unlock()
+
 			fakeConn.putPacket(buf[:n])
 
-			select {
-			case l.acceptCh <- fakeConn:
-			default:
+			if !fakeConn.IsAccepted() && !fakeConn.isNotified() {
+				select {
+				case l.acceptCh <- fakeConn:
+					fakeConn.setNotified(true)
+				default:
+				}
 			}
 		}
 	}()
@@ -224,8 +305,12 @@ func ListenUDP(bindAddr string, bindPort int) (l *UDPListener, err error) {
 			}
 
 			if addr, ok := packet.RemoteAddr.(*net.UDPAddr); ok {
-				_, _ = readConn.WriteToUDP(packet.Buf, addr)
+				if _, err := readConn.WriteToUDP(packet.Buf, addr); err != nil {
+					pool.PutBuf(packet.Buf)
+					return
+				}
 			}
+			pool.PutBuf(packet.Buf)
 		}
 	}()
 
@@ -244,20 +329,34 @@ func (l *UDPListener) writeUDPPacket(packet *UDPPacket) (err error) {
 
 func (l *UDPListener) WriteMsg(buf []byte, remoteAddr *net.UDPAddr) (err error) {
 	// only set remote addr here
+	packetBuf := pool.GetBuf(len(buf))
+	copy(packetBuf, buf)
 	packet := &UDPPacket{
-		Buf:        buf,
+		Buf:        packetBuf,
 		RemoteAddr: remoteAddr,
 	}
-	err = l.writeUDPPacket(packet)
+	if err = l.writeUDPPacket(packet); err != nil {
+		pool.PutBuf(packetBuf)
+	}
 	return
 }
 
 func (l *UDPListener) Accept() (net.Conn, error) {
 	conn, ok := <-l.acceptCh
 	if !ok {
-		return conn, fmt.Errorf("channel for udp listener closed")
+		return nil, fmt.Errorf("channel for udp listener closed")
+	}
+	if fc, ok := conn.(*FakeUDPConn); ok {
+		fc.markAccepted()
 	}
 	return conn, nil
+}
+
+func (l *UDPListener) closeChannels() {
+	l.closeOnce.Do(func() {
+		close(l.acceptCh)
+		close(l.writeCh)
+	})
 }
 
 func (l *UDPListener) Close() error {
@@ -281,6 +380,7 @@ func (l *UDPListener) Close() error {
 	if readConn != nil {
 		readConn.Close()
 	}
+	l.closeChannels()
 	return nil
 }
 

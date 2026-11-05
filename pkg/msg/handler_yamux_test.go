@@ -148,7 +148,11 @@ func loopbackCryptoConn(t *testing.T, conn net.Conn, protocol string, role netpk
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewConn(conn, NewReadWriter(rw, protocol))
+	readWriter, err := NewReadWriter(rw, protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewConn(conn, readWriter)
 }
 
 func loopbackControlPair(t *testing.T, client, server *fmux.Session, protocol string) (*Conn, *Conn, *observedYamuxConn) {
