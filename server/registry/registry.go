@@ -48,6 +48,8 @@ type ClientRegistry struct {
 	clock     clock.PassiveClock
 	closeOnce sync.Once
 	stopCh    chan struct{}
+	closed    bool
+	wg        sync.WaitGroup
 }
 
 func NewClientRegistry() *ClientRegistry {
@@ -64,6 +66,7 @@ func newClientRegistryWithClock(clk clock.PassiveClock) *ClientRegistry {
 		clock:    clk,
 		stopCh:   make(chan struct{}),
 	}
+	cr.wg.Add(1)
 	go cr.cleanupWorker()
 	return cr
 }
@@ -94,9 +97,15 @@ func (cr *ClientRegistry) RegisterWithControlID(
 	now := cr.clock.Now()
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
+	if cr.closed {
+		return "", false
+	}
 
 	info, exists := cr.clients[key]
-	if enforceUnique && exists && info.Online && info.RunID != "" && info.RunID != runID {
+	if enforceUnique && exists && info.Online && info.RunID != "" &&
+		(info.RunID != runID ||
+			(info.ControlID != 0 && controlID != 0 && controlID < info.ControlID) ||
+			(info.ControlID != 0 && controlID == 0)) {
 		return key, true
 	}
 	if previousKey, ok := cr.runIndex[runID]; ok && previousKey != key {
@@ -140,8 +149,11 @@ func (cr *ClientRegistry) RegisterWithControlID(
 }
 
 // MarkOfflineByRunID marks the client as offline when the corresponding control disconnects.
+// Legacy callers without a control ID may only retire entries that were registered
+// without a control ID; generation-aware entries owned by a newer control are left
+// untouched to avoid corrupting them.
 func (cr *ClientRegistry) MarkOfflineByRunID(runID string) {
-	cr.markOfflineByRunID(runID, 0, false)
+	cr.markOfflineByRunID(runID, 0, true)
 }
 
 // MarkOfflineByRunIDAndControlID marks a client offline only when the registry
@@ -153,6 +165,9 @@ func (cr *ClientRegistry) MarkOfflineByRunIDAndControlID(runID string, controlID
 func (cr *ClientRegistry) markOfflineByRunID(runID string, controlID uint64, matchControlID bool) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
+	if cr.closed {
+		return
+	}
 
 	key, ok := cr.runIndex[runID]
 	if !ok {
@@ -181,6 +196,9 @@ func setClientOffline(info *ClientInfo, now time.Time) {
 func (cr *ClientRegistry) List() []ClientInfo {
 	cr.mu.RLock()
 	defer cr.mu.RUnlock()
+	if cr.closed {
+		return nil
+	}
 
 	result := make([]ClientInfo, 0, len(cr.clients))
 	for _, info := range cr.clients {
@@ -193,6 +211,9 @@ func (cr *ClientRegistry) List() []ClientInfo {
 func (cr *ClientRegistry) GetByKey(key string) (ClientInfo, bool) {
 	cr.mu.RLock()
 	defer cr.mu.RUnlock()
+	if cr.closed {
+		return ClientInfo{}, false
+	}
 
 	info, ok := cr.clients[key]
 	if !ok {
@@ -223,6 +244,7 @@ func (cr *ClientRegistry) composeClientKey(user, id string) string {
 // cleanupWorker periodically removes offline entries with non-empty RawClientID
 // that have been disconnected for more than 24 hours.
 func (cr *ClientRegistry) cleanupWorker() {
+	defer cr.wg.Done()
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -250,6 +272,10 @@ func (cr *ClientRegistry) cleanupOfflineEntries() {
 // Close stops the cleanup worker.
 func (cr *ClientRegistry) Close() {
 	cr.closeOnce.Do(func() {
+		cr.mu.Lock()
+		cr.closed = true
+		cr.mu.Unlock()
 		close(cr.stopCh)
+		cr.wg.Wait()
 	})
 }

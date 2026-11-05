@@ -17,6 +17,7 @@ package client
 import (
 	"context"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -65,7 +66,9 @@ type Control struct {
 	// manage all visitors
 	vm *visitor.Manager
 
-	doneCh chan struct{}
+	doneCh           chan struct{}
+	closeOnce        sync.Once
+	closeSessionOnce sync.Once
 
 	// of time.Time, last time got the Pong message
 	lastPong atomic.Value
@@ -123,6 +126,11 @@ func (ctl *Control) SetInWorkConnCallback(cb func(*v1.ProxyBaseConfig, net.Conn,
 }
 
 func (ctl *Control) handleReqWorkConn(_ msg.Message) {
+	defer func() {
+		if r := recover(); r != nil {
+			ctl.xl.Errorf("handle ReqWorkConn panic: %v", r)
+		}
+	}()
 	xl := ctl.xl
 	workConn, err := ctl.connectServer()
 	if err != nil {
@@ -202,8 +210,18 @@ func (ctl *Control) handlePong(m msg.Message) {
 
 // closeSession closes the control connection.
 func (ctl *Control) closeSession() {
-	ctl.sessionCtx.Conn.Close()
-	ctl.sessionCtx.Connector.Close()
+	ctl.closeSessionOnce.Do(func() {
+		xl := ctl.xl
+		if xl == nil {
+			xl = xlog.FromContextSafe(ctl.ctx)
+		}
+		if err := ctl.sessionCtx.Conn.Close(); err != nil {
+			xl.Warnf("close control connection error: %v", err)
+		}
+		if err := ctl.sessionCtx.Connector.Close(); err != nil {
+			xl.Warnf("close connector error: %v", err)
+		}
+	})
 }
 
 func (ctl *Control) Close() error {
@@ -211,12 +229,16 @@ func (ctl *Control) Close() error {
 }
 
 func (ctl *Control) GracefulClose(d time.Duration) error {
-	ctl.pm.Close()
-	ctl.vm.Close()
+	ctl.closeOnce.Do(func() {
+		ctl.pm.Close()
+		ctl.vm.Close()
 
-	time.Sleep(d)
+		time.Sleep(d)
 
-	ctl.closeSession()
+		ctl.closeSession()
+		close(ctl.doneCh)
+	})
+	<-ctl.doneCh
 	return nil
 }
 
@@ -244,13 +266,21 @@ func (ctl *Control) heartbeatWorker() {
 	if ctl.sessionCtx.Common.Transport.HeartbeatInterval > 0 {
 		// Send heartbeat to server.
 		sendHeartBeat := func() (bool, error) {
+			defer func() {
+				if r := recover(); r != nil {
+					xl.Errorf("send heartbeat panic: %v", r)
+				}
+			}()
 			xl.Debugf("send heartbeat to server")
 			pingMsg := &msg.Ping{}
 			if err := ctl.sessionCtx.Auth.Setter.SetPing(pingMsg); err != nil {
 				xl.Warnf("error during ping authentication: %v, skip sending ping message", err)
 				return false, err
 			}
-			_ = ctl.msgDispatcher.Send(pingMsg)
+			if err := ctl.msgDispatcher.Send(pingMsg); err != nil {
+				xl.Warnf("send heartbeat to server error: %v", err)
+				return false, err
+			}
 			return false, nil
 		}
 
@@ -269,7 +299,13 @@ func (ctl *Control) heartbeatWorker() {
 	// Check heartbeat timeout.
 	if ctl.sessionCtx.Common.Transport.HeartbeatInterval > 0 && ctl.sessionCtx.Common.Transport.HeartbeatTimeout > 0 {
 		go wait.Until(func() {
-			if time.Since(ctl.lastPong.Load().(time.Time)) > time.Duration(ctl.sessionCtx.Common.Transport.HeartbeatTimeout)*time.Second {
+			defer func() {
+				if r := recover(); r != nil {
+					xl.Errorf("heartbeat timeout check panic: %v", r)
+				}
+			}()
+			lastPong, _ := ctl.lastPong.Load().(time.Time)
+			if time.Since(lastPong) > time.Duration(ctl.sessionCtx.Common.Transport.HeartbeatTimeout)*time.Second {
 				xl.Warnf("heartbeat timeout")
 				ctl.closeSession()
 				return
@@ -280,16 +316,17 @@ func (ctl *Control) heartbeatWorker() {
 
 func (ctl *Control) worker() {
 	xl := ctl.xl
+	defer func() {
+		if r := recover(); r != nil {
+			xl.Errorf("control worker panic: %v", r)
+		}
+		ctl.GracefulClose(0)
+	}()
 	go ctl.heartbeatWorker()
 	go ctl.msgDispatcher.Run()
 
 	<-ctl.msgDispatcher.Done()
 	xl.Debugf("control message dispatcher exited")
-	ctl.closeSession()
-
-	ctl.pm.Close()
-	ctl.vm.Close()
-	close(ctl.doneCh)
 }
 
 func (ctl *Control) UpdateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) error {

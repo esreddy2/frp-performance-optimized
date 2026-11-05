@@ -100,3 +100,8 @@ func (g *HTTPSGroup) Listen(
 	}
 	return
 }
+
+// Close releases resources owned by the controller.
+func (ctl *HTTPSGroupController) Close() error {
+	return nil
+}

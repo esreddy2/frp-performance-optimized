@@ -140,7 +140,8 @@ type Service struct {
 	// manager control connection with server
 	ctl *Control
 	// Uniq id got from frps, it will be attached to loginMsg.
-	runID string
+	runIDMu sync.Mutex
+	runID   string
 
 	// Auth runtime and encryption materials
 	auth *auth.ClientAuth
@@ -148,6 +149,12 @@ type Service struct {
 	// web server for admin UI and apis
 	webServer     *httppkg.Server
 	metricsServer *httppkg.Server
+
+	// WaitGroups join the Run goroutines of the HTTP servers and the vnet
+	// controller so shutdown can wait for them to exit.
+	webServerWg     sync.WaitGroup
+	metricsServerWg sync.WaitGroup
+	vnetWg          sync.WaitGroup
 
 	vnetController *vnet.Controller
 
@@ -278,6 +285,8 @@ func NewService(options ServiceOptions) (*Service, error) {
 	return s, nil
 }
 
+// Run drives the service. A Service is single-use: after Close or
+// GracefulClose has been called, Run returns without attempting login.
 func (svr *Service) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	svr.lifecycleMu.Lock()
@@ -304,14 +313,21 @@ func (svr *Service) Run(ctx context.Context) error {
 		vnetController := svr.vnetController
 		if err := svr.vnetController.Init(); err != nil {
 			log.Errorf("init virtual network controller error: %v", err)
+			if stopErr := vnetController.Stop(); stopErr != nil {
+				log.Warnf("stop virtual network controller error: %v", stopErr)
+			}
+			svr.vnetController = nil
 			return err
 		}
-		go func() {
+		svr.vnetWg.Go(func() {
 			log.Infof("virtual network controller start...")
 			if err := vnetController.Run(); err != nil && !errors.Is(err, net.ErrClosed) {
 				log.Warnf("virtual network controller exit with error: %v", err)
+				if svr.cancel != nil {
+					svr.cancel(cancelErr{Err: err})
+				}
 			}
-		}()
+		})
 	}
 
 	if svr.webServer != nil {
@@ -322,22 +338,22 @@ func (svr *Service) Run(ctx context.Context) error {
 			log.Infof("webServer /healthz is deprecated; health probes can migrate to metricsServer.port")
 		}
 		webServer := svr.webServer
-		go func() {
+		svr.webServerWg.Go(func() {
 			log.Infof("admin server listen on %s", webServer.Address())
 			if err := webServer.Run(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Warnf("admin server exit with error: %v", err)
 			}
-		}()
+		})
 	}
 
 	if svr.metricsServer != nil {
 		metricsServer := svr.metricsServer
-		go func() {
+		svr.metricsServerWg.Go(func() {
 			log.Infof("metrics server listen on %s", metricsServer.Address())
 			if err := metricsServer.Run(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Warnf("metrics server exit with error: %v", err)
 			}
-		}()
+		})
 	}
 
 	// first login to frps
@@ -363,17 +379,23 @@ func (svr *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("login to the server failed: %v. With loginFailExit enabled, no additional retries will be attempted", cancelCause.Err)
 	}
 
-	go svr.keepControllerWorking()
+	svr.ctlMu.RLock()
+	initialCtl := svr.ctl
+	svr.ctlMu.RUnlock()
+	go svr.keepControllerWorking(initialCtl)
 
 	<-svr.ctx.Done()
 	return nil
 }
 
-func (svr *Service) keepControllerWorking() {
-	// ctl is swapped under ctlMu in loopLoginUntilSuccess / stop; take a
-	// snapshot before waiting so stop's nil write does not race this read.
+func (svr *Service) keepControllerWorking(initialCtl *Control) {
+	// Re-read the current control under lock so a replacement that happened
+	// before this goroutine started is not missed.
+	ctl := initialCtl
 	svr.ctlMu.RLock()
-	ctl := svr.ctl
+	if cur := svr.ctl; cur != nil {
+		ctl = cur
+	}
 	svr.ctlMu.RUnlock()
 	if ctl == nil {
 		return
@@ -395,7 +417,8 @@ func (svr *Service) keepControllerWorking() {
 			<-ctl.Done()
 			return false, errors.New("control is closed and try another loop")
 		}
-		// If the control is nil, it means that the login failed and the service is also closed.
+		// If ctl is nil, no control was installed (login failure, rejected
+		// first-login hook, or service shutdown); stop reconnecting.
 		return false, nil
 	}, wait.NewFastBackoffManager(
 		wait.FastBackoffOptions{
@@ -415,6 +438,9 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 	xl := xlog.FromContextSafe(svr.ctx)
 
 	loginFunc := func() (bool, error) {
+		if svr.ctx.Err() != nil {
+			return false, svr.ctx.Err()
+		}
 		xl.Infof("try to connect to server...")
 		dialer := &controlSessionDialer{
 			ctx:              svr.ctx,
@@ -424,7 +450,10 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 			vnetController:   svr.vnetController,
 			connectorCreator: svr.connectorCreator,
 		}
-		sessionCtx, err := dialer.Dial(svr.runID)
+		svr.runIDMu.Lock()
+		runID := svr.runID
+		svr.runIDMu.Unlock()
+		sessionCtx, err := dialer.Dial(runID)
 		if err != nil {
 			errOutput := err
 			if !lo.FromPtr(svr.common.Transport.TLS.Enable) && !svr.common.Transport.UsesImplicitTLS() {
@@ -447,9 +476,12 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 			return false, context.Cause(svr.ctx)
 		}
 
+		svr.runIDMu.Lock()
 		svr.runID = sessionCtx.RunID
-		xl.AddPrefix(xlog.LogPrefix{Name: "runID", Value: svr.runID})
-		xl.Infof("login to server success, get run id [%s]", svr.runID)
+		runID = svr.runID
+		svr.runIDMu.Unlock()
+		xl.AddPrefix(xlog.LogPrefix{Name: "runID", Value: runID})
+		xl.Infof("login to server success, get run id [%s]", runID)
 		if err := svr.runFirstLoginSuccessHook(); err != nil {
 			closeSessionContext(sessionCtx)
 			svr.cancel(cancelErr{Err: err})
@@ -465,23 +497,27 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 		}
 		ctl.SetInWorkConnCallback(svr.handleWorkConnCb)
 
-		// An update must either precede this snapshot or apply to the published
-		// control. Keep dialing and login outside the reload transaction.
+		// Capture the config snapshot under reloadMu, then publish the new
+		// control before running proxy startup so reloads issued during startup
+		// target the new control. Proxy startup itself runs outside the lock
+		// so reloads are not blocked by it.
 		svr.reloadMu.Lock()
-		defer svr.reloadMu.Unlock()
 		svr.cfgMu.RLock()
 		proxyCfgs := svr.proxyCfgs
 		visitorCfgs := svr.visitorCfgs
 		svr.cfgMu.RUnlock()
 
-		ctl.Run(proxyCfgs, visitorCfgs)
-		// close and replace previous control
 		svr.ctlMu.Lock()
-		if svr.ctl != nil {
-			svr.ctl.Close()
-		}
+		old := svr.ctl
 		svr.ctl = ctl
 		svr.ctlMu.Unlock()
+		svr.reloadMu.Unlock()
+
+		ctl.Run(proxyCfgs, visitorCfgs)
+
+		if old != nil {
+			old.Close()
+		}
 		return true, nil
 	}
 
@@ -517,7 +553,10 @@ func (svr *Service) runFirstLoginSuccessHook() error {
 		return nil
 	}
 	svr.firstLoginSuccessOnce.Do(func() {
-		if err := svr.onFirstLoginSuccess(svr.runID); err != nil {
+		svr.runIDMu.Lock()
+		runID := svr.runID
+		svr.runIDMu.Unlock()
+		if err := svr.onFirstLoginSuccess(runID); err != nil {
 			svr.firstLoginSuccessError = &firstLoginSuccessHookError{cause: err}
 		}
 	})
@@ -545,9 +584,8 @@ func (svr *Service) updateAllConfigurerLocked(proxyCfgs []v1.ProxyConfigurer, vi
 	svr.cfgMu.Unlock()
 
 	svr.ctlMu.RLock()
+	defer svr.ctlMu.RUnlock()
 	ctl := svr.ctl
-	svr.ctlMu.RUnlock()
-
 	if ctl != nil {
 		return ctl.UpdateAllConfigurer(proxyCfgs, visitorCfgs)
 	}
@@ -625,24 +663,35 @@ func (svr *Service) stop() {
 	svr.reloadMu.Unlock()
 
 	svr.ctlMu.Lock()
-	defer svr.ctlMu.Unlock()
-	if svr.ctl != nil {
+	ctl := svr.ctl
+	svr.ctl = nil
+	svr.ctlMu.Unlock()
+
+	if ctl != nil {
 		d := time.Duration(svr.gracefulShutdownDuration.Load())
-		svr.ctl.GracefulClose(d)
-		svr.ctl = nil
+		ctl.GracefulClose(d)
 	}
 	if svr.webServer != nil {
-		svr.webServer.Close()
+		if err := svr.webServer.Close(); err != nil {
+			log.Warnf("close web server error: %v", err)
+		}
 		svr.webServer = nil
 	}
+	svr.webServerWg.Wait()
 	if svr.metricsServer != nil {
-		svr.metricsServer.Close()
+		if err := svr.metricsServer.Close(); err != nil {
+			log.Warnf("close metrics server error: %v", err)
+		}
 		svr.metricsServer = nil
 	}
+	svr.metricsServerWg.Wait()
 	if svr.vnetController != nil {
-		_ = svr.vnetController.Stop()
+		if err := svr.vnetController.Stop(); err != nil {
+			log.Warnf("stop virtual network controller error: %v", err)
+		}
 		svr.vnetController = nil
 	}
+	svr.vnetWg.Wait()
 }
 
 func (svr *Service) getProxyStatus(name string) (*proxy.WorkingStatus, bool) {

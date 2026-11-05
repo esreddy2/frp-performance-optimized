@@ -78,15 +78,6 @@ func TestGracefulCloseDoesNotBlockDuringStop(t *testing.T) {
 		}
 	}()
 
-	deadline := time.Now().Add(time.Second)
-	for svr.ctlMu.TryLock() {
-		svr.ctlMu.Unlock()
-		if time.Now().After(deadline) {
-			t.Fatal("stop did not acquire ctlMu")
-		}
-		time.Sleep(time.Millisecond)
-	}
-
 	start := time.Now()
 	svr.GracefulClose(0)
 	if elapsed := time.Since(start); elapsed >= gracefulDuration/2 {

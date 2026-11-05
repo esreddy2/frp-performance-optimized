@@ -138,12 +138,13 @@ func TestServiceReloadDuringControlHandoff(t *testing.T) {
 			svr.ctlMu.RLock()
 			current := svr.ctl
 			svr.ctlMu.RUnlock()
-			require.Same(t, previous, current, "replacement must still be unpublished")
-			// Check before starting the updater so it cannot be the lock owner.
+			require.NotSame(t, previous, current, "replacement must be published before proxy startup")
+			// reloadMu is released during proxy startup so reloads are not blocked.
 			unlocked := svr.reloadMu.TryLock()
 			if unlocked {
 				svr.reloadMu.Unlock()
 			}
+			require.True(t, unlocked, "control startup must not hold the reload transaction during proxy startup")
 
 			newProxy := &v1.TCPProxyConfig{
 				ProxyBaseConfig: v1.ProxyBaseConfig{Name: "proxy", Type: "tcp"},
@@ -167,14 +168,6 @@ func TestServiceReloadDuringControlHandoff(t *testing.T) {
 				waitLifecycleSignal(t, updateDone)
 			})
 
-			// The gate fixes the handoff window. On the old implementation the
-			// update completes against the retired control before this gate opens.
-			select {
-			case <-updateDone:
-				t.Error("config update completed before control handoff")
-			case <-time.After(20 * time.Millisecond):
-			}
-			require.False(t, unlocked, "control startup must hold the reload transaction until publication")
 			resume()
 			waitLifecycleSignal(t, loginDone)
 			waitLifecycleSignal(t, updateDone)

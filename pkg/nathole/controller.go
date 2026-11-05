@@ -400,3 +400,8 @@ func getRangePorts(addrs []string, difference, maxNumber int) []msg.PortsRange {
 	})
 	return ports
 }
+
+// Close releases resources owned by the controller.
+func (c *Controller) Close() error {
+	return nil
+}

@@ -69,6 +69,9 @@ type ControlManager struct {
 	registry    *registry.ClientRegistry
 	closed      bool
 
+	// per-run locks serializing concurrent Add calls for the same run ID
+	addLocks map[string]*sync.Mutex
+
 	mu sync.RWMutex
 }
 
@@ -111,6 +114,21 @@ func (cm *ControlManager) lockCurrentRun(runID string, allowClosed bool) (*contr
 // Add makes ctl the pending current generation and records the predecessor
 // finalization barrier it must wait for before activation.
 func (cm *ControlManager) Add(ctl *Control) error {
+	// Serialize concurrent Add calls for the same run ID so runMu inheritance
+	// cannot race.
+	cm.mu.Lock()
+	if cm.addLocks == nil {
+		cm.addLocks = make(map[string]*sync.Mutex)
+	}
+	addLock, ok := cm.addLocks[ctl.runID]
+	if !ok {
+		addLock = &sync.Mutex{}
+		cm.addLocks[ctl.runID] = addLock
+	}
+	cm.mu.Unlock()
+	addLock.Lock()
+	defer addLock.Unlock()
+
 	for {
 		// Never wait for a run gate while holding cm.mu.
 		cm.mu.RLock()
@@ -182,27 +200,33 @@ func (cm *ControlManager) Activate(ctl *Control) (bool, error) {
 		return false, nil
 	}
 	defer entry.runMu.Unlock()
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
 
+	cm.mu.Lock()
 	if cm.closed || cm.ctlsByRunID[ctl.runID] != entry || entry.ctl != ctl || entry.id != ctl.controlID {
+		cm.mu.Unlock()
 		return false, nil
 	}
-
 	ctl.lifecycleMu.Lock()
-	defer ctl.lifecycleMu.Unlock()
 	if ctl.state != controlStatePending {
+		ctl.lifecycleMu.Unlock()
+		cm.mu.Unlock()
 		return false, nil
 	}
 	if ctl.activated {
+		ctl.lifecycleMu.Unlock()
+		cm.mu.Unlock()
 		return true, nil
 	}
-
 	loginMsg := ctl.sessionCtx.LoginMsg
 	remoteAddr := ctl.sessionCtx.Conn.RemoteAddr().String()
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		remoteAddr = host
 	}
+	ctl.lifecycleMu.Unlock()
+	cm.mu.Unlock()
+
+	// Register outside the manager lock so registry contention does not stall
+	// control activation.
 	_, conflict := cm.registry.RegisterWithControlID(
 		loginMsg.User,
 		loginMsg.ClientID,
@@ -213,6 +237,26 @@ func (cm *ControlManager) Activate(ctl *Control) (bool, error) {
 		ctl.sessionCtx.WireProtocol,
 		uint64(entry.id),
 	)
+
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.closed || cm.ctlsByRunID[ctl.runID] != entry || entry.ctl != ctl || entry.id != ctl.controlID {
+		if !conflict {
+			cm.registry.MarkOfflineByRunIDAndControlID(ctl.runID, uint64(entry.id))
+		}
+		return false, nil
+	}
+	ctl.lifecycleMu.Lock()
+	defer ctl.lifecycleMu.Unlock()
+	if ctl.state != controlStatePending {
+		if !conflict {
+			cm.registry.MarkOfflineByRunIDAndControlID(ctl.runID, uint64(entry.id))
+		}
+		return false, nil
+	}
+	if ctl.activated {
+		return true, nil
+	}
 	if conflict {
 		return true, fmt.Errorf("client_id [%s] for user [%s] is already online", loginMsg.ClientID, loginMsg.User)
 	}
@@ -226,7 +270,9 @@ func (cm *ControlManager) Activate(ctl *Control) (bool, error) {
 // completeLogin reserves ctl's current ownership with its run gate while the
 // bounded successful LoginResp write runs, then transitions it to running.
 // The callback must only perform that bounded write; it must not call back into
-// the control manager or the same control lifecycle.
+// the control manager or the same control lifecycle. writeSuccess runs while
+// runMu and lifecycleMu are held, so it must not reenter them (strict
+// no-reentry contract).
 func (cm *ControlManager) completeLogin(ctl *Control, writeSuccess func() error) (bool, error) {
 	entry, ok := cm.lockCurrentRun(ctl.runID, false)
 	if !ok {
@@ -330,16 +376,35 @@ func (cm *ControlManager) RegisterWorkConn(ctl *Control, conn *proxy.WorkConn) e
 		return fmt.Errorf("client control for run id [%s] is not running", ctl.runID)
 	}
 
-	// Publish tracking before the pool can hand the stream to a proxy.
+	// Publish tracking before the pool can hand the stream to a proxy. Install
+	// the close callback first, then record the connection, checking that it has
+	// not already closed in between.
 	conn.SetCloseCallback(func() {
 		ctl.mu.Lock()
 		delete(ctl.workConns, conn)
 		ctl.mu.Unlock()
 	})
 	ctl.mu.Lock()
+	if _, exists := ctl.workConns[conn]; exists {
+		ctl.mu.Unlock()
+		return fmt.Errorf("work connection is already registered")
+	}
+	if conn.IsClosed() {
+		ctl.mu.Unlock()
+		return fmt.Errorf("work connection is already closed")
+	}
 	ctl.workConns[conn] = struct{}{}
 	ctl.mu.Unlock()
 
+	// Serialize the send with worker close to avoid sending on a closed channel.
+	ctl.workConnSendMu.Lock()
+	defer ctl.workConnSendMu.Unlock()
+	if ctl.workConnChClosed {
+		ctl.mu.Lock()
+		delete(ctl.workConns, conn)
+		ctl.mu.Unlock()
+		return pkgerr.ErrCtlClosed
+	}
 	select {
 	case ctl.workConnCh <- conn:
 		ctl.xl.Debugf("new work connection registered")
@@ -433,6 +498,11 @@ type Control struct {
 
 	// work connections
 	workConnCh chan *proxy.WorkConn
+
+	// serializes sends on workConnCh with worker close to avoid sending on a
+	// closed channel.
+	workConnSendMu   sync.Mutex
+	workConnChClosed bool
 
 	// work connections owned by this control. Retirement interrupts them so
 	// that in-flight user streams do not linger until their own timeouts.
@@ -585,16 +655,26 @@ func (ctl *Control) startLocked() bool {
 	return true
 }
 
+// Close releases the control's resources. On a non-running control it also
+// removes the entry from its ControlManager so no stale entry remains; a
+// running control is removed by its worker when it finishes. Close returns
+// before the worker completes (asynchronous semantics).
 func (ctl *Control) Close() error {
+	removeFromManager := false
 	ctl.lifecycleMu.Lock()
 	switch ctl.state {
 	case controlStateCreated, controlStatePending:
 		ctl.state = controlStateClosing
 		ctl.finishLocked()
+		removeFromManager = true
 	case controlStateRunning:
 		ctl.state = controlStateClosing
 	}
+	manager := ctl.manager
 	ctl.lifecycleMu.Unlock()
+	if removeFromManager && manager != nil {
+		manager.Remove(ctl)
+	}
 	return ctl.interruptReadAndClose()
 }
 
@@ -692,11 +772,19 @@ func (ctl *Control) finishLocked() {
 func (ctl *Control) GetWorkConn() (workConn *proxy.WorkConn, err error) {
 	xl := ctl.xl
 	defer func() {
-		if err := recover(); err != nil {
-			xl.Errorf("panic error: %v", err)
+		if r := recover(); r != nil {
+			xl.Errorf("panic error: %v", r)
 			xl.Errorf(string(debug.Stack()))
+			err = fmt.Errorf("panic in GetWorkConn: %v", r)
 		}
 	}()
+
+	ctl.lifecycleMu.Lock()
+	state := ctl.state
+	ctl.lifecycleMu.Unlock()
+	if state != controlStateRunning {
+		return nil, pkgerr.ErrCtlClosed
+	}
 
 	var ok bool
 	// get a work connection from the pool
@@ -742,7 +830,11 @@ func (ctl *Control) heartbeatWorker() {
 
 	xl := ctl.xl
 	wait.Until(func() {
-		if time.Since(ctl.lastPing.Load().(time.Time)) > time.Duration(ctl.sessionCtx.ServerCfg.Transport.HeartbeatTimeout)*time.Second {
+		lastPing, ok := ctl.lastPing.Load().(time.Time)
+		if !ok {
+			lastPing = time.Time{}
+		}
+		if time.Since(lastPing) > time.Duration(ctl.sessionCtx.ServerCfg.Transport.HeartbeatTimeout)*time.Second {
 			xl.Warnf("heartbeat timeout")
 			_ = ctl.Close()
 			return
@@ -801,6 +893,24 @@ func (ctl *Control) closeProxy(registered registeredProxy) error {
 }
 
 func (ctl *Control) worker() {
+	defer func() {
+		if r := recover(); r != nil {
+			ctl.xl.Errorf("panic error: %v", r)
+			ctl.xl.Errorf(string(debug.Stack()))
+		}
+		// Ensure the work connection channel is closed even on panic.
+		ctl.workConnSendMu.Lock()
+		if !ctl.workConnChClosed {
+			ctl.workConnChClosed = true
+			close(ctl.workConnCh)
+		}
+		ctl.workConnSendMu.Unlock()
+		// Ensure doneCh is closed even on panic.
+		ctl.lifecycleMu.Lock()
+		ctl.finishLocked()
+		ctl.lifecycleMu.Unlock()
+	}()
+
 	xl := ctl.xl
 	ctl.serverMetrics.NewClient()
 
@@ -821,11 +931,17 @@ func (ctl *Control) worker() {
 	ctl.lifecycleMu.Unlock()
 	_ = ctl.interruptReadAndClose()
 
-	ctl.mu.Lock()
-	close(ctl.workConnCh)
+	ctl.workConnSendMu.Lock()
+	if !ctl.workConnChClosed {
+		ctl.workConnChClosed = true
+		close(ctl.workConnCh)
+	}
+	ctl.workConnSendMu.Unlock()
+
 	// Collect the pooled connections under the lock but close them outside of
 	// it: closing a work connection runs its close callback, which takes the
 	// same lock to drop the connection from the tracking set.
+	ctl.mu.Lock()
 	idle := make([]*proxy.WorkConn, 0, len(ctl.workConnCh))
 	for workConn := range ctl.workConnCh {
 		idle = append(idle, workConn)
@@ -1102,20 +1218,22 @@ func (ctl *Control) RegisterProxy(
 	}
 
 	// Check ports used number in each client
+	usedPorts := 0
 	if ctl.sessionCtx.ServerCfg.MaxPortsPerClient > 0 {
+		usedPorts = pxy.GetUsedPortsNum()
 		ctl.mu.Lock()
-		if ctl.portsUsedNum+pxy.GetUsedPortsNum() > int(ctl.sessionCtx.ServerCfg.MaxPortsPerClient) {
+		if ctl.portsUsedNum+usedPorts > int(ctl.sessionCtx.ServerCfg.MaxPortsPerClient) {
 			ctl.mu.Unlock()
 			err = fmt.Errorf("exceed the max_ports_per_client")
 			return
 		}
-		ctl.portsUsedNum += pxy.GetUsedPortsNum()
+		ctl.portsUsedNum += usedPorts
 		ctl.mu.Unlock()
 
 		defer func() {
 			if err != nil {
 				ctl.mu.Lock()
-				ctl.portsUsedNum -= pxy.GetUsedPortsNum()
+				ctl.portsUsedNum -= usedPorts
 				ctl.mu.Unlock()
 			}
 		}()
@@ -1126,18 +1244,27 @@ func (ctl *Control) RegisterProxy(
 		return
 	}
 
-	remoteAddr, err = pxy.Run()
-	if err != nil {
-		return
-	}
 	defer func() {
 		if err != nil {
 			pxy.Close()
 		}
 	}()
 
-	err = ctl.sessionCtx.PxyManager.Add(pxyMsg.ProxyName, pxy)
+	// Add to the proxy manager before running so a successfully started proxy
+	// is never untracked. On Run failure, remove the stale entry.
+	ctl.mu.Lock()
+	addErr := ctl.sessionCtx.PxyManager.Add(pxyMsg.ProxyName, pxy)
+	ctl.mu.Unlock()
+	if addErr != nil {
+		err = addErr
+		return
+	}
+
+	remoteAddr, err = pxy.Run()
 	if err != nil {
+		ctl.mu.Lock()
+		ctl.sessionCtx.PxyManager.Del(pxyMsg.ProxyName)
+		ctl.mu.Unlock()
 		return
 	}
 
@@ -1175,12 +1302,38 @@ func (ctl *Control) CloseProxy(closeMsg *msg.CloseProxy) (err error) {
 		ctl.mu.Unlock()
 		return
 	}
-
+	usedPorts := 0
 	if ctl.sessionCtx.ServerCfg.MaxPortsPerClient > 0 {
-		ctl.portsUsedNum -= registered.proxy.GetUsedPortsNum()
+		usedPorts = registered.proxy.GetUsedPortsNum()
 	}
 	delete(ctl.proxies, closeMsg.ProxyName)
 	ctl.mu.Unlock()
 
-	return ctl.closeProxy(registered)
+	// Retire the proxy first; only then adjust port accounting so a failed
+	// retirement does not leave accounting inconsistent.
+	if err := ctl.retireRegisteredProxy(registered); err != nil {
+		ctl.mu.Lock()
+		ctl.proxies[closeMsg.ProxyName] = registered
+		ctl.mu.Unlock()
+		return err
+	}
+	if ctl.sessionCtx.ServerCfg.MaxPortsPerClient > 0 {
+		ctl.mu.Lock()
+		ctl.portsUsedNum -= usedPorts
+		ctl.mu.Unlock()
+	}
+
+	pxy := registered.proxy
+	notifyContent := &plugin.CloseProxyContent{
+		User:      registered.user,
+		AttemptID: registered.attemptID,
+		CloseProxy: msg.CloseProxy{
+			ProxyName: pxy.GetName(),
+		},
+	}
+	if err := ctl.sessionCtx.PluginManager.CloseProxy(notifyContent); err != nil {
+		ctl.xl.Warnf("enqueue CloseProxy plugin notification for proxy [%s] error: %v", pxy.GetName(), err)
+		return err
+	}
+	return nil
 }

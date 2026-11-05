@@ -50,7 +50,10 @@ type WorkConn struct {
 	conn      *msg.Conn
 	closeOnce sync.Once
 	closeErr  error
+
+	onCloseMu sync.Mutex
 	onClose   func()
+	closed    bool
 }
 
 func NewWorkConn(conn *msg.Conn) *WorkConn {
@@ -58,8 +61,25 @@ func NewWorkConn(conn *msg.Conn) *WorkConn {
 }
 
 // SetCloseCallback records the owning control's release callback. The owner
-// sets it before publishing this connection to its work pool.
-func (c *WorkConn) SetCloseCallback(fn func()) { c.onClose = fn }
+// sets it before publishing this connection to its work pool. If the connection
+// has already closed, the callback is invoked immediately so tracking is not
+// lost.
+func (c *WorkConn) SetCloseCallback(fn func()) {
+	c.onCloseMu.Lock()
+	c.onClose = fn
+	alreadyClosed := c.closed
+	c.onCloseMu.Unlock()
+	if alreadyClosed && fn != nil {
+		fn()
+	}
+}
+
+// IsClosed reports whether Close has been invoked on this work connection.
+func (c *WorkConn) IsClosed() bool {
+	c.onCloseMu.Lock()
+	defer c.onCloseMu.Unlock()
+	return c.closed
+}
 
 func (c *WorkConn) Start(m *msg.StartWorkConn) (net.Conn, error) {
 	if err := c.conn.WriteMsg(m); err != nil {
@@ -78,8 +98,12 @@ func (c *WorkConn) Interrupt() error {
 func (c *WorkConn) Close() error {
 	c.closeOnce.Do(func() {
 		c.closeErr = c.conn.Close()
-		if c.onClose != nil {
-			c.onClose()
+		c.onCloseMu.Lock()
+		c.closed = true
+		cb := c.onClose
+		c.onCloseMu.Unlock()
+		if cb != nil {
+			cb()
 		}
 	})
 	return c.closeErr

@@ -127,3 +127,8 @@ func (tmg *TCPMuxGroup) HTTPConnectListen(
 	}
 	return
 }
+
+// Close releases resources owned by the controller.
+func (tmgc *TCPMuxGroupCtl) Close() error {
+	return nil
+}

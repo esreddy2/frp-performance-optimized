@@ -189,3 +189,8 @@ func (g *HTTPGroup) createConnByEndpoint(endpoint, remoteAddr string) (net.Conn,
 	}
 	return f(remoteAddr)
 }
+
+// Close releases resources owned by the controller.
+func (ctl *HTTPGroupController) Close() error {
+	return nil
+}

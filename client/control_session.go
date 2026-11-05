@@ -57,7 +57,9 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
 	success := false
 	defer func() {
 		if !success {
-			_ = connector.Close()
+			if err := connector.Close(); err != nil {
+				log.Warnf("close connector on dial failure: %v", err)
+			}
 		}
 	}()
 
@@ -67,7 +69,9 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
 	}
 	defer func() {
 		if !success {
-			_ = conn.Close()
+			if err := conn.Close(); err != nil {
+				log.Warnf("close connection on dial failure: %v", err)
+			}
 		}
 	}()
 
@@ -106,7 +110,11 @@ func (d *controlSessionDialer) Dial(previousRunID string) (*SessionContext, erro
 }
 
 func (d *controlSessionDialer) buildLoginMsg(previousRunID string) (*msg.Login, error) {
-	hostname, _ := os.Hostname()
+	hostname, err := os.Hostname()
+	if err != nil {
+		log.Warnf("get hostname error: %v", err)
+		hostname = ""
+	}
 	loginMsg := &msg.Login{
 		Arch:      runtime.GOARCH,
 		Os:        runtime.GOOS,
@@ -171,7 +179,9 @@ func (d *controlSessionDialer) exchangeLogin(conn net.Conn, loginMsg *msg.Login)
 		return nil, err
 	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return nil, err
+	}
 	defer func() {
 		_ = conn.SetReadDeadline(time.Time{})
 	}()
@@ -223,13 +233,11 @@ func (d *controlSessionDialer) newControlReadWriter(conn net.Conn, cryptoContext
 						"(upgrade frps to support v2 key agreement, or set transport.requireKeyShare = false in frpc.toml if operating over a trusted network)",
 				)
 			}
-			if d.common.Auth.Method != v1.AuthMethodToken {
-				if !lo.FromPtr(d.common.Transport.TLS.Enable) && !d.common.Transport.UsesImplicitTLS() {
-					log.Warnf("server did not offer an X25519 key share and TLS is disabled; " +
-						"the v2 control channel is not protected against passive observers, upgrade frps or set transport.tls.enable = true")
-				} else {
-					log.Warnf("server did not offer an X25519 key share; the v2 control channel is not protected against passive observers, upgrade frps")
-				}
+			if !lo.FromPtr(d.common.Transport.TLS.Enable) && !d.common.Transport.UsesImplicitTLS() {
+				log.Warnf("server did not offer an X25519 key share and TLS is disabled; " +
+					"the v2 control channel is not protected against passive observers, upgrade frps or set transport.tls.enable = true")
+			} else {
+				log.Warnf("server did not offer an X25519 key share; the v2 control channel is not protected against passive observers, upgrade frps")
 			}
 		}
 		return netpkg.NewAEADCryptoReadWriter(

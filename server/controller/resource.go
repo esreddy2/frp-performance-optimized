@@ -15,6 +15,8 @@
 package controller
 
 import (
+	"errors"
+
 	"github.com/fatedier/frp/pkg/nathole"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/util/tcpmux"
@@ -64,17 +66,60 @@ type ResourceController struct {
 }
 
 func (rc *ResourceController) Close() error {
-	if rc.VhostHTTPSMuxer != nil {
-		rc.VhostHTTPSMuxer.Close()
-	}
-	if rc.TCPMuxHTTPConnectMuxer != nil {
-		rc.TCPMuxHTTPConnectMuxer.Close()
-	}
+	var errs []error
+
+	// Close port managers before vhost muxers to avoid port/routing races.
 	if rc.TCPPortManager != nil {
 		rc.TCPPortManager.Close()
 	}
 	if rc.UDPPortManager != nil {
 		rc.UDPPortManager.Close()
 	}
-	return nil
+
+	if rc.VhostHTTPSMuxer != nil {
+		if err := rc.VhostHTTPSMuxer.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rc.TCPMuxHTTPConnectMuxer != nil {
+		if err := rc.TCPMuxHTTPConnectMuxer.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if rc.VisitorManager != nil {
+		if err := rc.VisitorManager.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rc.TCPGroupCtl != nil {
+		if err := rc.TCPGroupCtl.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rc.HTTPGroupCtl != nil {
+		if err := rc.HTTPGroupCtl.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rc.HTTPSGroupCtl != nil {
+		if err := rc.HTTPSGroupCtl.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rc.TCPMuxGroupCtl != nil {
+		if err := rc.TCPMuxGroupCtl.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rc.NatHoleController != nil {
+		if err := rc.NatHoleController.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rc.PluginManager != nil {
+		rc.PluginManager.Close()
+	}
+
+	return errors.Join(errs...)
 }

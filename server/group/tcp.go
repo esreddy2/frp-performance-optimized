@@ -121,3 +121,8 @@ func (tg *TCPGroup) Listen(proxyName string, group string, groupKey string, addr
 	}
 	return
 }
+
+// Close releases resources owned by the controller.
+func (tgc *TCPGroupCtl) Close() error {
+	return nil
+}

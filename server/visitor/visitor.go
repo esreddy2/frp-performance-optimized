@@ -131,3 +131,17 @@ func (vm *Manager) CloseListener(name string) {
 	}
 	delete(vm.listeners, name)
 }
+
+// Close closes all registered visitor listeners.
+func (vm *Manager) Close() error {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+
+	for name, l := range vm.listeners {
+		if l != nil && l.l != nil {
+			_ = l.l.Close()
+		}
+		delete(vm.listeners, name)
+	}
+	return nil
+}

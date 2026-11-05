@@ -149,7 +149,14 @@ type Service struct {
 	cancel      context.CancelFunc
 	lifecycleMu sync.Mutex
 	closed      bool
+	started     bool
 	closeOnce   sync.Once
+
+	// Track TCPMux outer sessions so they can be closed during shutdown.
+	muxSessions sync.Map
+
+	// Track in-flight QUIC connection handler goroutines.
+	quicConnsWG sync.WaitGroup
 }
 
 func NewService(cfg *v1.ServerConfig) (svr *Service, err error) {
@@ -407,6 +414,11 @@ func NewService(cfg *v1.ServerConfig) (svr *Service, err error) {
 
 	// frp tls listener
 	svr.tlsListener = svr.muxer.Listen(2, 1, func(data []byte) bool {
+		// The muxer guarantees a non-empty initial read before invoking this
+		// matcher; guard anyway so an empty read never panics.
+		if len(data) == 0 {
+			return false
+		}
 		// tls first byte can be 0x16 only when vhost https port is not same with bind port
 		return int(data[0]) == netpkg.FRPTLSHeadByte || int(data[0]) == 0x16
 	})
@@ -495,6 +507,12 @@ func (svr *Service) Run(ctx context.Context) {
 		cancel()
 		return
 	}
+	if svr.started {
+		svr.lifecycleMu.Unlock()
+		cancel()
+		return
+	}
+	svr.started = true
 	svr.ctx = ctx
 	svr.cancel = cancel
 	svr.lifecycleMu.Unlock()
@@ -583,6 +601,8 @@ func (svr *Service) closeResources() {
 	if svr.quicTransport != nil {
 		svr.quicTransport.Close()
 	}
+	// Wait for in-flight QUIC connection handlers to drain.
+	svr.quicConnsWG.Wait()
 	if svr.quicConn != nil {
 		svr.quicConn.Close()
 	}
@@ -616,17 +636,28 @@ func (svr *Service) closeResources() {
 	if svr.muxer != nil {
 		svr.muxer.Close()
 	}
-	if svr.clientRegistry != nil {
-		svr.clientRegistry.Close()
-	}
-
 	// Close the controls and wait, within a bounded budget, for their workers
 	// to publish the proxy teardown notifications. The plugin notification
 	// pipeline is stopped only afterwards so those notifications are still
-	// delivered during a graceful shutdown.
+	// delivered during a graceful shutdown. The client registry is closed only
+	// after the controls have finished, since ctlManager.Close() and control
+	// workers may still call registry methods.
 	ctls := svr.ctlManager.Snapshot()
 	svr.ctlManager.Close()
 	waitControlsClosed(ctls, controlShutdownWaitTimeout)
+
+	// Close any remaining TCPMux outer sessions (including failed/never-activated
+	// ones) after controls have retired.
+	svr.muxSessions.Range(func(key, value any) bool {
+		if session, ok := key.(io.Closer); ok {
+			_ = session.Close()
+		}
+		return true
+	})
+
+	if svr.clientRegistry != nil {
+		svr.clientRegistry.Close()
+	}
 
 	svr.pluginManager.Close()
 }
@@ -700,9 +731,12 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 			}); writeErr != nil {
 				xl.Warnf("write login error response error: %v", writeErr)
 			}
-			if ctl != nil {
+			switch {
+			case ctl != nil:
 				_ = ctl.Close()
-			} else {
+			case session != nil:
+				_ = session.Close()
+			default:
 				conn.Close()
 			}
 			return
@@ -728,9 +762,11 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 			acceptedConn.wireProtocol,
 			acceptedConn.clientHelloPresent,
 		); err != nil {
-			_ = acceptedConn.conn.WriteMsg(&msg.StartWorkConn{
+			if writeErr := acceptedConn.conn.WriteMsg(&msg.StartWorkConn{
 				Error: util.GenerateResponseErrorString("invalid NewWorkConn", err, lo.FromPtr(svr.cfg.DetailedErrorsToClient)),
-			})
+			}); writeErr != nil {
+				xl.Warnf("write start work conn error: %v", writeErr)
+			}
 			conn.Close()
 		}
 	case *msg.NewVisitorConn:
@@ -908,12 +944,27 @@ func (ac *acceptedConnection) handleClientHello(conn net.Conn, wireConn *wire.Co
 // TODO(fatedier): Pass some parameters of listener/connection through context to avoid passing too many parameters.
 func (svr *Service) HandleListener(l net.Listener, internal bool) {
 	// Listen for incoming connections from client.
+	var tempDelay time.Duration
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			log.Warnf("listener for incoming connections from client closed")
+			if ne, ok := err.(interface{ Temporary() bool }); ok && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if maxTime := 1 * time.Second; tempDelay > maxTime {
+					tempDelay = maxTime
+				}
+				log.Infof("met temporary accept error: %s, sleep for %s ...", err, tempDelay)
+				time.Sleep(tempDelay)
+				continue
+			}
+			log.Warnf("listener for incoming connections from client closed: %v", err)
 			return
 		}
+		tempDelay = 0
 		if tcpConn, ok := c.(*net.TCPConn); ok {
 			_ = tcpConn.SetNoDelay(true)
 		}
@@ -951,6 +1002,8 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 					frpConn.Close()
 					return
 				}
+				svr.muxSessions.Store(session, struct{}{})
+				defer svr.muxSessions.Delete(session)
 
 				for {
 					stream, err := session.AcceptStream()
@@ -973,11 +1026,15 @@ func (svr *Service) HandleQUICListener(ctx context.Context, l *quic.Listener) {
 	for {
 		c, err := l.Accept(ctx)
 		if err != nil {
-			log.Warnf("quic listener for incoming connections from client closed")
+			log.Warnf("quic listener for incoming connections from client closed: %v", err)
 			return
 		}
 		// Start a new goroutine to handle connection.
+		svr.quicConnsWG.Add(1)
 		go func(ctx context.Context, frpConn *quic.Conn) {
+			defer svr.quicConnsWG.Done()
+			var streamsWG sync.WaitGroup
+			defer streamsWG.Wait()
 			for {
 				stream, err := frpConn.AcceptStream(ctx)
 				if err != nil {
@@ -985,7 +1042,11 @@ func (svr *Service) HandleQUICListener(ctx context.Context, l *quic.Listener) {
 					_ = frpConn.CloseWithError(0, "")
 					return
 				}
-				go svr.handleConnection(ctx, netpkg.QuicStreamToNetConn(stream, frpConn), false, nil)
+				streamsWG.Add(1)
+				go func(s *quic.Stream) {
+					defer streamsWG.Done()
+					svr.handleConnection(ctx, netpkg.QuicStreamToNetConn(s, frpConn), false, nil)
+				}(stream)
 			}
 		}(ctx, c)
 	}
