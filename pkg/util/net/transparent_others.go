@@ -30,6 +30,7 @@ func DialTCPTransparent(
 
 // DialUDPTransparent is a stub on non-Linux platforms.
 func DialUDPTransparent(
+	ctx context.Context,
 	localAddr *net.UDPAddr,
 	dstAddr *net.UDPAddr,
 	socketMark int,

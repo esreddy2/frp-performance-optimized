@@ -18,6 +18,8 @@ export interface ProxyFormData {
   bandwidthLimit: string
   bandwidthLimitMode: string
   proxyProtocolVersion: string
+  proxyProtocolMode: string
+  socketMark: number | undefined
 
   // Load Balancer (LoadBalancerConfig)
   loadBalancerGroup: string
@@ -109,6 +111,8 @@ export function createDefaultProxyForm(): ProxyFormData {
     bandwidthLimit: '',
     bandwidthLimitMode: 'client',
     proxyProtocolVersion: '',
+    proxyProtocolMode: '',
+    socketMark: undefined,
 
     loadBalancerGroup: '',
     loadBalancerGroupKey: '',

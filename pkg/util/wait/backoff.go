@@ -70,7 +70,7 @@ func newFastBackoffManagerWithClock(options FastBackoffOptions, clk clock.Passiv
 	return &fastBackoffImpl{
 		options:                 options,
 		clock:                   clk,
-		countsInFastRetryWindow: 1,
+		countsInFastRetryWindow: 0,
 	}
 }
 
@@ -89,14 +89,14 @@ func (f *fastBackoffImpl) Backoff(previousDuration time.Duration, previousCondit
 	}
 
 	if f.options.FastRetryCount > 0 && previousConditionError {
-		f.countsInFastRetryWindow++
-		if f.countsInFastRetryWindow <= f.options.FastRetryCount {
-			return Jitter(f.options.FastRetryDelay, f.options.FastRetryJitter)
-		}
 		if now.After(f.fastRetryCutoffTime) {
 			// reset
 			f.fastRetryCutoffTime = now.Add(f.options.FastRetryWindow)
 			f.countsInFastRetryWindow = 0
+		}
+		f.countsInFastRetryWindow++
+		if f.countsInFastRetryWindow <= f.options.FastRetryCount {
+			return Jitter(f.options.FastRetryDelay, f.options.FastRetryJitter)
 		}
 	}
 

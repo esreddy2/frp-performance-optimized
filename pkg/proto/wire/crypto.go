@@ -48,14 +48,31 @@ type CryptoContext struct {
 	SharedSecret   []byte
 }
 
-// DeriveIKM returns the ECDH shared secret followed by the pre-shared auth key.
-// Either may be absent.
+// DeriveIKM derives input keying material from the ECDH shared secret and
+// the pre-shared auth key. When SharedSecret is empty, authKey is returned
+// directly for backward compatibility with peers that do not send a key share.
+// When SharedSecret is non-empty, both inputs are length-prefixed to avoid
+// boundary ambiguity between SharedSecret and authKey.
 func (c *CryptoContext) DeriveIKM(authKey []byte) []byte {
-	if len(c.SharedSecret) > math.MaxInt-len(authKey) {
+	var sharedSecret []byte
+	if c != nil {
+		sharedSecret = c.SharedSecret
+	}
+	if len(sharedSecret) == 0 {
+		if len(authKey) == 0 {
+			return nil
+		}
+		ikm := make([]byte, len(authKey))
+		copy(ikm, authKey)
+		return ikm
+	}
+	if len(authKey) > math.MaxInt-16 || len(sharedSecret) > math.MaxInt-16-len(authKey) {
 		return nil
 	}
-	ikm := make([]byte, 0, len(c.SharedSecret)+len(authKey))
-	ikm = append(ikm, c.SharedSecret...)
+	ikm := make([]byte, 0, 8+len(sharedSecret)+8+len(authKey))
+	ikm = binary.BigEndian.AppendUint64(ikm, uint64(len(sharedSecret)))
+	ikm = append(ikm, sharedSecret...)
+	ikm = binary.BigEndian.AppendUint64(ikm, uint64(len(authKey)))
 	ikm = append(ikm, authKey...)
 	return ikm
 }

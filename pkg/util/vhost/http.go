@@ -16,6 +16,7 @@ package vhost
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -198,11 +199,15 @@ func checkRouteAuthByRequest(req *http.Request, rc *RouteConfig) bool {
 			return false
 		}
 		user, passwd, ok := httppkg.ParseBasicAuth(proxyAuth)
-		return ok && user == rc.Username && passwd == rc.Password
+		userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(rc.Username))
+		passMatch := subtle.ConstantTimeCompare([]byte(passwd), []byte(rc.Password))
+		return ok && (userMatch&passMatch) == 1
 	}
 
 	user, passwd, ok := req.BasicAuth()
-	return ok && user == rc.Username && passwd == rc.Password
+	userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(rc.Username))
+	passMatch := subtle.ConstantTimeCompare([]byte(passwd), []byte(rc.Password))
+	return ok && (userMatch&passMatch) == 1
 }
 
 func (rp *HTTPReverseProxy) connectHandler(rw http.ResponseWriter, req *http.Request) {

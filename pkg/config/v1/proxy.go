@@ -172,7 +172,9 @@ func (c *ProxyBaseConfig) Complete() {
 	}
 	switch c.Transport.ProxyProtocol {
 	case "v1", "v2":
-		c.Transport.ProxyProtocolMode = util.EmptyOr(c.Transport.ProxyProtocolMode, "first-packet")
+		if c.Type == "udp" || c.Type == "sudp" {
+			c.Transport.ProxyProtocolMode = util.EmptyOr(c.Transport.ProxyProtocolMode, "first-packet")
+		}
 		c.Transport.SocketMark = 0
 	case "tproxy":
 		if c.Transport.SocketMark == 0 {

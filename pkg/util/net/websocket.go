@@ -35,7 +35,7 @@ type WebsocketListener struct {
 func NewWebsocketListener(ln net.Listener) (wl *WebsocketListener) {
 	wl = &WebsocketListener{
 		ln:       ln,
-		acceptCh: make(chan net.Conn, 256),
+		acceptCh: make(chan net.Conn),
 		done:     make(chan struct{}),
 		pending:  make(map[net.Conn]func()),
 	}
@@ -59,6 +59,12 @@ func NewWebsocketListener(ln net.Listener) (wl *WebsocketListener) {
 			defer func() { _ = recover() }()
 			closeNotify()
 		})
+		select {
+		case <-wl.done:
+			conn.Close()
+			return
+		default:
+		}
 		wl.mu.Lock()
 		wl.pending[conn] = closeNotify
 		wl.mu.Unlock()
@@ -103,10 +109,7 @@ func (p *WebsocketListener) Accept() (net.Conn, error) {
 	case c := <-p.acceptCh:
 		p.mu.Lock()
 		delete(p.pending, c)
-		pendingClose := func() {}
-		// mark accepted: no listener-side close of notifyCh
 		p.mu.Unlock()
-		_ = pendingClose
 		select {
 		case <-p.done:
 			c.Close()

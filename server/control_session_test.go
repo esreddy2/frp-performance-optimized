@@ -74,11 +74,12 @@ func TestControlConcurrentReplacementClosesLosingSessions(t *testing.T) {
 			r := result{client: client, server: server, conn: clientConn}
 			select {
 			case <-start:
+				ts := time.Now().Unix()
 				r.ctl, r.err = svr.RegisterControl(serverConn, &msg.Login{
 					RunID:        "shared-run",
 					ClientID:     "client",
-					Timestamp:    1,
-					PrivilegeKey: util.GetAuthKey("", 1),
+					Timestamp:    ts,
+					PrivilegeKey: util.GetAuthKey("", ts),
 				}, false, wire.ProtocolV1, "", server)
 				if r.err == nil {
 					r.err = svr.completeControlLogin(r.ctl, func() error { return nil })
@@ -170,11 +171,12 @@ func newYamuxTestSession(t *testing.T) (*fmux.Session, *fmux.Session, *msg.Conn,
 func newYamuxTestControl(t *testing.T, svr *Service) (*Control, *fmux.Session, *fmux.Session, *msg.Conn) {
 	t.Helper()
 	client, server, clientConn, serverConn := newYamuxTestSession(t)
+	ts := time.Now().Unix()
 	ctl, err := svr.RegisterControl(serverConn, &msg.Login{
 		RunID:        "shared-run",
 		ClientID:     "client",
-		Timestamp:    1,
-		PrivilegeKey: util.GetAuthKey("", 1),
+		Timestamp:    ts,
+		PrivilegeKey: util.GetAuthKey("", ts),
 	}, false, wire.ProtocolV1, "", server)
 	require.NoError(t, err)
 	t.Cleanup(func() {

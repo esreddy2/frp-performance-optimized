@@ -215,3 +215,26 @@ func TestStoreSource_LoadFromFile_UnknownFieldsAreIgnored(t *testing.T) {
 	require.NotNil(storeSource.GetProxy("proxy1"))
 	require.NotNil(storeSource.GetVisitor("visitor1"))
 }
+
+func TestStoreSource_DirectoryPermissions(t *testing.T) {
+	require := require.New(t)
+
+	dir := filepath.Join(t.TempDir(), "nested-store-dir")
+	path := filepath.Join(dir, "store.json")
+
+	storeSource, err := NewStoreSource(StoreSourceConfig{Path: path})
+	require.NoError(err)
+
+	err = storeSource.AddProxy(&v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name:         "p1",
+			Type:         "tcp",
+			ProxyBackend: v1.ProxyBackend{LocalPort: 8080},
+		},
+	})
+	require.NoError(err)
+
+	info, err := os.Stat(dir)
+	require.NoError(err)
+	require.Equal(os.FileMode(0o700), info.Mode().Perm())
+}

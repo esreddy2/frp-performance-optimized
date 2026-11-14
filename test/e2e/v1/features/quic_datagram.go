@@ -1,13 +1,16 @@
 package features
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 
 	"github.com/fatedier/frp/pkg/naming"
+	"github.com/fatedier/frp/pkg/proto/udp"
 	"github.com/fatedier/frp/test/e2e/framework"
 	"github.com/fatedier/frp/test/e2e/framework/consts"
 	"github.com/fatedier/frp/test/e2e/pkg/port"
@@ -23,6 +26,7 @@ var _ = ginkgo.Describe("[Feature: QUIC Datagram]", func() {
 		transport.quic.enableDatagrams = true
 		`, consts.PortServerName)
 
+		remotePortName := port.GenName("QUICDatagramRemotePort")
 		clientConf := consts.DefaultClientConfig
 		clientConf += fmt.Sprintf(`
 		transport.protocol = "quic"
@@ -34,7 +38,7 @@ var _ = ginkgo.Describe("[Feature: QUIC Datagram]", func() {
 		localPort = {{ .%s }}
 		remotePort = {{ .%s }}
 		quicDatagrams = true
-		`, framework.UDPEchoServerPort, port.GenName("QUICDatagramRemotePort"))
+		`, framework.UDPEchoServerPort, remotePortName)
 
 		serverProcess, clientProcesses := f.RunProcesses(serverConf, []string{clientConf})
 
@@ -46,21 +50,111 @@ var _ = ginkgo.Describe("[Feature: QUIC Datagram]", func() {
 
 		// QUIC datagrams are unreliable and unordered, so retry the echo
 		// instead of expecting the first packet to arrive.
-		remotePortName := port.GenName("QUICDatagramRemotePort")
 		req := framework.NewRequest().UDP().Port(f.PortByName(remotePortName))
-
-		var lastErr error
-		received := false
-		for range 20 {
+		gomega.Eventually(func(g gomega.Gomega) {
 			resp, err := req.Do()
-			if err == nil && string(resp.Content) == consts.TestString {
-				received = true
-				break
-			}
-			lastErr = err
-			time.Sleep(200 * time.Millisecond)
-		}
-		framework.ExpectTrue(received, "udp echo did not arrive over the quic datagram path", lastErr)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(string(resp.Content)).To(gomega.Equal(consts.TestString))
+		}, 10*time.Second, 200*time.Millisecond).Should(gomega.Succeed())
+	})
+
+	ginkgo.It("relays a user-prefixed udp proxy at the max datagram identifier length", func() {
+		serverConf := consts.DefaultServerConfig
+		serverConf += fmt.Sprintf(`
+		quicBindPort = {{ .%s }}
+		transport.quic.enableDatagrams = true
+		`, consts.PortServerName)
+
+		user := "dg-user"
+		// Wire-level name is "<user>.<proxyName>". At exactly MaxDatagramIdentifierLength,
+		// the datagram lane must still be enabled.
+		proxyName := strings.Repeat("n", naming.MaxDatagramIdentifierLength-len(user)-1)
+		remotePortName := port.GenName("QUICDatagramMaxNameRemotePort")
+
+		clientConf := consts.DefaultClientConfig
+		clientConf += fmt.Sprintf(`
+		transport.protocol = "quic"
+		transport.quic.enableDatagrams = true
+		user = "%s"
+
+		[[proxies]]
+		name = "%s"
+		type = "udp"
+		localPort = {{ .%s }}
+		remotePort = {{ .%s }}
+		quicDatagrams = true
+		`, user, proxyName, framework.UDPEchoServerPort, remotePortName)
+
+		serverProcess, clientProcesses := f.RunProcesses(serverConf, []string{clientConf})
+		framework.ExpectNoError(serverProcess.WaitForOutput("udp proxy relaying via quic datagrams", 1, 10*time.Second))
+		framework.ExpectNoError(clientProcesses[0].WaitForOutput("udp proxy relaying via quic datagrams", 1, 10*time.Second))
+
+		req := framework.NewRequest().UDP().Port(f.PortByName(remotePortName))
+		gomega.Eventually(func(g gomega.Gomega) {
+			resp, err := req.Do()
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(string(resp.Content)).To(gomega.Equal(consts.TestString))
+		}, 10*time.Second, 200*time.Millisecond).Should(gomega.Succeed())
+	})
+
+	ginkgo.It("handles oversized udp payloads via stream fallback or strict drop", func() {
+		serverConf := consts.DefaultServerConfig
+		serverConf += fmt.Sprintf(`
+		quicBindPort = {{ .%s }}
+		transport.quic.enableDatagrams = true
+		`, consts.PortServerName)
+
+		fallbackPortName := port.GenName("QUICDatagramFallbackRemotePort")
+		strictPortName := port.GenName("QUICDatagramStrictRemotePort")
+
+		clientConf := consts.DefaultClientConfig
+		clientConf += fmt.Sprintf(`
+		transport.protocol = "quic"
+		transport.quic.enableDatagrams = true
+
+		[[proxies]]
+		name = "udp-datagram-fallback"
+		type = "udp"
+		localPort = {{ .%s }}
+		remotePort = {{ .%s }}
+		quicDatagrams = true
+
+		[[proxies]]
+		name = "udp-datagram-strict"
+		type = "udp"
+		localPort = {{ .%s }}
+		remotePort = {{ .%s }}
+		quicDatagrams = true
+		quicDatagramStrict = true
+		`, framework.UDPEchoServerPort, fallbackPortName, framework.UDPEchoServerPort, strictPortName)
+
+		serverProcess, clientProcesses := f.RunProcesses(serverConf, []string{clientConf})
+		framework.ExpectNoError(serverProcess.WaitForOutput("udp proxy relaying via quic datagrams", 2, 10*time.Second))
+		framework.ExpectNoError(clientProcesses[0].WaitForOutput("udp proxy relaying via quic datagrams", 2, 10*time.Second))
+
+		oversized := bytes.Repeat([]byte("a"), udp.DatagramFrameBudget+1)
+
+		// Default mode: oversized payload falls back to the reliable work-connection stream.
+		fallbackReq := framework.NewRequest().UDP().Port(f.PortByName(fallbackPortName)).Body(oversized)
+		gomega.Eventually(func(g gomega.Gomega) {
+			resp, err := fallbackReq.Do()
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(resp.Content).To(gomega.Equal(oversized))
+		}, 10*time.Second, 200*time.Millisecond).Should(gomega.Succeed())
+
+		// Strict mode: normal payload succeeds over datagrams, while oversized payload is dropped.
+		strictSmallReq := framework.NewRequest().UDP().Port(f.PortByName(strictPortName))
+		gomega.Eventually(func(g gomega.Gomega) {
+			resp, err := strictSmallReq.Do()
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(string(resp.Content)).To(gomega.Equal(consts.TestString))
+		}, 10*time.Second, 200*time.Millisecond).Should(gomega.Succeed())
+
+		_, err := framework.NewRequest().UDP().Port(f.PortByName(strictPortName)).
+			Timeout(500 * time.Millisecond).
+			Body(oversized).
+			Do()
+		gomega.Expect(err).To(gomega.HaveOccurred(), "oversized udp payload should be dropped when quicDatagramStrict is true")
 	})
 
 	// The datagram lane identifies a proxy by its wire-level name, and the

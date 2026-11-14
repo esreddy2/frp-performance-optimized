@@ -17,14 +17,17 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
 	"github.com/fatedier/frp/pkg/proto/wire"
+	"github.com/fatedier/frp/pkg/util/xlog"
 )
 
 func TestReadNatHoleSidUsesSelectedWireProtocol(t *testing.T) {
@@ -68,4 +71,28 @@ func setPipeDeadline(t *testing.T, conns ...net.Conn) {
 	for _, conn := range conns {
 		require.NoError(t, conn.SetDeadline(deadline))
 	}
+}
+
+func TestXTCPProxyConstructorAndInWorkConnError(t *testing.T) {
+	base := &BaseProxy{
+		baseCfg: &v1.ProxyBaseConfig{Name: "xtcp-test"},
+		clientCfg: &v1.ClientCommonConfig{
+			Transport: v1.ClientTransportConfig{WireProtocol: wire.ProtocolV1},
+		},
+		xl:  xlog.New(),
+		ctx: context.Background(),
+	}
+
+	require.Nil(t, NewXTCPProxy(base, &v1.TCPProxyConfig{}))
+
+	xtcpCfg := &v1.XTCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{Name: "xtcp-test", Type: "xtcp"},
+	}
+	pxy := NewXTCPProxy(base, xtcpCfg)
+	require.NotNil(t, pxy)
+
+	// InWorkConn when peer closes immediately returns cleanly after readNatHoleSid error
+	c1, c2 := net.Pipe()
+	_ = c2.Close()
+	pxy.InWorkConn(c1, &msg.StartWorkConn{})
 }

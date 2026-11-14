@@ -48,6 +48,9 @@ func NewVirtualNetPlugin(pluginCtx PluginContext, options v1.ClientPluginOptions
 func (p *VirtualNetPlugin) Handle(ctx context.Context, connInfo *ConnectionInfo) {
 	// Verify if virtual network controller is available
 	if p.pluginCtx.VnetController == nil {
+		if connInfo != nil && connInfo.Conn != nil {
+			_ = connInfo.Conn.Close()
+		}
 		return
 	}
 

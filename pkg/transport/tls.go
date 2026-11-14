@@ -107,7 +107,9 @@ func appendCertsFromFile(pool *x509.CertPool, caPath string) error {
 }
 
 func NewServerTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
-	base := &tls.Config{}
+	base := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
 
 	if certPath == "" || keyPath == "" {
 		// server will generate tls conf by itself
@@ -138,6 +140,12 @@ func NewServerTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
 	return base, nil
 }
 
+// NewClientTLSConfig builds a client TLS config using only caPath as a trust
+// anchor. When caPath is empty, server certificate verification is disabled
+// (InsecureSkipVerify = true) for backward compatibility with ephemeral
+// self-signed server certificates (such as XTCP tunnels and default frps).
+// Prefer NewClientTLSConfigWithSystemCA with useSystemCa=true or a non-empty
+// caPath whenever authenticating a server with a known CA.
 func NewClientTLSConfig(certPath, keyPath, caPath, serverName string) (*tls.Config, error) {
 	return NewClientTLSConfigWithSystemCA(certPath, keyPath, caPath, serverName, false)
 }
@@ -158,7 +166,9 @@ func newClientTLSConfig(
 		return nil, fmt.Errorf("both tls cert and key must be provided together")
 	}
 
-	base := &tls.Config{}
+	base := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
 
 	if certPath != "" && keyPath != "" {
 		cert, err := newCustomTLSKeyPair(certPath, keyPath)
@@ -196,6 +206,7 @@ func newClientTLSConfig(
 	case useSystemCa:
 		base.InsecureSkipVerify = false
 	default:
+		// lgtm[go/disabled-certificate-check]
 		base.InsecureSkipVerify = true
 	}
 

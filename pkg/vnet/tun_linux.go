@@ -33,6 +33,11 @@ const (
 )
 
 func openTun(_ context.Context, addr string) (tun.Device, error) {
+	ip, cidr, err := net.ParseCIDR(addr)
+	if err != nil {
+		return nil, err
+	}
+
 	name, err := findNextTunName(baseTunName)
 	if err != nil {
 		name = getFallbackTunName(baseTunName, addr)
@@ -42,6 +47,12 @@ func openTun(_ context.Context, addr string) (tun.Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TUN device '%s': %w", name, err)
 	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = tunDevice.Close()
+		}
+	}()
 
 	actualName, err := tunDevice.Name()
 	if err != nil {
@@ -58,10 +69,6 @@ func openTun(_ context.Context, addr string) (tun.Device, error) {
 		return nil, err
 	}
 
-	ip, cidr, err := net.ParseCIDR(addr)
-	if err != nil {
-		return nil, err
-	}
 	if err := netlink.AddrAdd(link, &netlink.Addr{
 		IPNet: &net.IPNet{
 			IP:   ip,
@@ -78,6 +85,7 @@ func openTun(_ context.Context, addr string) (tun.Device, error) {
 	if err = addRoutes(ifn, cidr); err != nil {
 		return nil, err
 	}
+	cleanup = false
 	return tunDevice, nil
 }
 

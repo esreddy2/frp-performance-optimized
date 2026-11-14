@@ -17,6 +17,7 @@ package log
 import (
 	"bytes"
 	"os"
+	"sync"
 
 	"github.com/fatedier/golib/log"
 )
@@ -29,7 +30,10 @@ var (
 	ErrorLevel = log.ErrorLevel
 )
 
-var Logger *log.Logger
+var (
+	Logger   *log.Logger
+	loggerMu sync.RWMutex
+)
 
 func init() {
 	Logger = log.New(
@@ -64,31 +68,41 @@ func InitLogger(logPath string, levelStr string, maxDays int, disableLogColor bo
 		level = log.InfoLevel
 	}
 	options = append(options, log.WithLevel(level))
+
+	loggerMu.Lock()
 	Logger = Logger.WithOptions(options...)
+	loggerMu.Unlock()
+}
+
+func currentLogger() *log.Logger {
+	loggerMu.RLock()
+	l := Logger
+	loggerMu.RUnlock()
+	return l
 }
 
 func Errorf(format string, v ...any) {
-	Logger.Errorf(format, v...)
+	currentLogger().Errorf(format, v...)
 }
 
 func Warnf(format string, v ...any) {
-	Logger.Warnf(format, v...)
+	currentLogger().Warnf(format, v...)
 }
 
 func Infof(format string, v ...any) {
-	Logger.Infof(format, v...)
+	currentLogger().Infof(format, v...)
 }
 
 func Debugf(format string, v ...any) {
-	Logger.Debugf(format, v...)
+	currentLogger().Debugf(format, v...)
 }
 
 func Tracef(format string, v ...any) {
-	Logger.Tracef(format, v...)
+	currentLogger().Tracef(format, v...)
 }
 
 func Logf(level log.Level, offset int, format string, v ...any) {
-	Logger.Logf(level, offset, format, v...)
+	currentLogger().Logf(level, offset, format, v...)
 }
 
 type WriteLogger struct {
@@ -104,6 +118,6 @@ func NewWriteLogger(level log.Level, offset int) *WriteLogger {
 }
 
 func (w *WriteLogger) Write(p []byte) (n int, err error) {
-	Logger.Log(w.level, w.offset, string(bytes.TrimRight(p, "\n")))
+	currentLogger().Log(w.level, w.offset, string(bytes.TrimRight(p, "\n")))
 	return len(p), nil
 }

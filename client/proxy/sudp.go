@@ -17,9 +17,11 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"reflect"
 	"strconv"
+	"sync"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
@@ -40,11 +42,13 @@ type SUDPProxy struct {
 
 	localAddr *net.UDPAddr
 
-	workConn net.Conn
-	readCh   chan *msg.UDPPacket
-	sendCh   chan msg.Message
-	closeCh  chan struct{}
-	closed   bool
+	workConn   net.Conn
+	workConnWg *sync.WaitGroup
+	wg         sync.WaitGroup
+	readCh     chan *msg.UDPPacket
+	sendCh     chan msg.Message
+	closeCh    chan struct{}
+	closed     bool
 }
 
 func NewSUDPProxy(baseProxy *BaseProxy, cfg v1.ProxyConfigurer) Proxy {
@@ -71,13 +75,15 @@ func (pxy *SUDPProxy) Run() (err error) {
 // that is currently installed.
 func (pxy *SUDPProxy) Close() {
 	pxy.mu.Lock()
-	defer pxy.mu.Unlock()
-
 	if pxy.closed {
+		pxy.mu.Unlock()
 		return
 	}
 	pxy.closed = true
-	pxy.retireWorkConnLocked()
+	_ = pxy.retireWorkConnLocked()
+	pxy.mu.Unlock()
+
+	pxy.wg.Wait()
 }
 
 // retireWorkConnLocked stops the work connection that is currently installed
@@ -86,7 +92,7 @@ func (pxy *SUDPProxy) Close() {
 // that belong to it.
 //
 // The caller must hold pxy.mu.
-func (pxy *SUDPProxy) retireWorkConnLocked() {
+func (pxy *SUDPProxy) retireWorkConnLocked() *sync.WaitGroup {
 	if pxy.workConn != nil {
 		_ = pxy.workConn.Close()
 		pxy.workConn = nil
@@ -106,6 +112,9 @@ func (pxy *SUDPProxy) retireWorkConnLocked() {
 	}
 	pxy.readCh = nil
 	pxy.sendCh = nil
+	wg := pxy.workConnWg
+	pxy.workConnWg = nil
+	return wg
 }
 
 // readSUDPWorkConn reads udp packets from the work connection and forwards
@@ -148,7 +157,7 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, _ *msg.StartWorkConn) {
 	xl := pxy.xl
 	xl.Infof("incoming a new work connection for sudp proxy, %s", conn.RemoteAddr().String())
 
-	remote, _, err := pxy.wrapWorkConn(conn, pxy.encryptionKey)
+	remote, recycleFn, err := pxy.wrapWorkConn(conn, pxy.encryptionKey)
 	if err != nil {
 		xl.Errorf("wrap work connection: %v", err)
 		return
@@ -159,6 +168,9 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, _ *msg.StartWorkConn) {
 	if err != nil {
 		xl.Errorf("create SUDP packet read writer: %v", err)
 		_ = workConn.Close()
+		if recycleFn != nil {
+			recycleFn()
+		}
 		return
 	}
 	payloadConn := msg.NewConn(workConn, payloadRW)
@@ -183,17 +195,32 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, _ *msg.StartWorkConn) {
 		pxy.mu.Unlock()
 		xl.Warnf("sudp proxy is closed, drop the new work connection")
 		_ = workConn.Close()
+		if recycleFn != nil {
+			recycleFn()
+		}
 		return
 	}
 	readCh := make(chan *msg.UDPPacket, 1024)
 	sendCh := make(chan msg.Message, 1024)
 	closeCh := make(chan struct{})
-	pxy.retireWorkConnLocked()
+	n := 4
+	if recycleFn != nil {
+		n = 5
+	}
+	pxy.wg.Add(n)
+	workConnWg := &sync.WaitGroup{}
+	workConnWg.Add(n)
+	oldWg := pxy.retireWorkConnLocked()
 	pxy.workConn = workConn
+	pxy.workConnWg = workConnWg
 	pxy.readCh = readCh
 	pxy.sendCh = sendCh
 	pxy.closeCh = closeCh
 	pxy.mu.Unlock()
+
+	if oldWg != nil {
+		oldWg.Wait()
+	}
 
 	// closeFn is called when one of the goroutines of this work connection
 	// stops. It retires the work connection, but only when it is still the
@@ -205,26 +232,37 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, _ *msg.StartWorkConn) {
 		if pxy.workConn != workConn {
 			return
 		}
-		pxy.retireWorkConnLocked()
+		_ = pxy.retireWorkConnLocked()
 	}
 
+	baseCtx := pxy.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(baseCtx)
+
+	var rwWg sync.WaitGroup
 	workConnReaderFn := func(payloadConn *msg.Conn, readCh chan *msg.UDPPacket) {
+		defer rwWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				xl.Infof("reader goroutine for sudp work connection closed: %v", r)
 			}
 		}()
+		defer cancel()
 		defer closeFn()
 
 		readSUDPWorkConn(payloadConn, readCh, closeCh, xl)
 	}
 
 	workConnSenderFn := func(payloadConn *msg.Conn, sendCh chan msg.Message) {
+		defer rwWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				xl.Infof("writer goroutine for sudp work connection closed: %v", r)
 			}
 		}()
+		defer cancel()
 		defer closeFn()
 
 		var errRet error
@@ -281,11 +319,32 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, _ *msg.StartWorkConn) {
 		}
 	}
 
-	go workConnSenderFn(payloadConn, sendCh)
-	go workConnReaderFn(payloadConn, readCh)
-	go heartbeatFn(sendCh, closeCh)
+	rwWg.Add(2)
+	go func() {
+		defer pxy.wg.Done()
+		defer workConnWg.Done()
+		workConnSenderFn(payloadConn, sendCh)
+	}()
+	go func() {
+		defer pxy.wg.Done()
+		defer workConnWg.Done()
+		workConnReaderFn(payloadConn, readCh)
+	}()
+	go func() {
+		defer pxy.wg.Done()
+		defer workConnWg.Done()
+		heartbeatFn(sendCh, closeCh)
+	}()
+	if recycleFn != nil {
+		go func() {
+			defer pxy.wg.Done()
+			defer workConnWg.Done()
+			rwWg.Wait()
+			recycleFn()
+		}()
+	}
 
-	udp.Forwarder(
+	done := udp.ForwarderWithDone(
 		pxy.localAddr,
 		readCh,
 		sendCh,
@@ -293,6 +352,7 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, _ *msg.StartWorkConn) {
 		int(pxy.clientCfg.UDPPacketSize),
 		pxy.cfg.Transport.ProxyProtocol,
 		udp.ForwarderOptions{
+			Context:           ctx,
 			ProxyProtocol:     pxy.cfg.Transport.ProxyProtocol,
 			ProxyProtocolMode: pxy.cfg.Transport.ProxyProtocolMode,
 			SocketMark:        pxy.cfg.Transport.SocketMark,
@@ -301,4 +361,9 @@ func (pxy *SUDPProxy) InWorkConn(conn net.Conn, _ *msg.StartWorkConn) {
 			},
 		},
 	)
+	go func() {
+		defer pxy.wg.Done()
+		defer workConnWg.Done()
+		<-done
+	}()
 }

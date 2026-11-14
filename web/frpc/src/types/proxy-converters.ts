@@ -46,7 +46,21 @@ export function formToStoreProxy(form: ProxyFormData): ProxyDefinition {
       block.transport.bandwidthLimitMode = form.bandwidthLimitMode
     }
     if (form.proxyProtocolVersion) {
-      block.transport.proxyProtocolVersion = form.proxyProtocolVersion
+      block.transport.proxyProtocol = form.proxyProtocolVersion
+      if (
+        (form.type === 'udp' || form.type === 'sudp') &&
+        (form.proxyProtocolVersion === 'v1' ||
+          form.proxyProtocolVersion === 'v2') &&
+        form.proxyProtocolMode
+      ) {
+        block.transport.proxyProtocolMode = form.proxyProtocolMode
+      }
+      if (
+        form.proxyProtocolVersion === 'tproxy' &&
+        form.socketMark != null
+      ) {
+        block.transport.socketMark = form.socketMark
+      }
     }
   }
 
@@ -348,7 +362,18 @@ export function storeProxyToForm(config: ProxyDefinition): ProxyFormData {
     form.useCompression = c.transport.useCompression || false
     form.bandwidthLimit = c.transport.bandwidthLimit || ''
     form.bandwidthLimitMode = c.transport.bandwidthLimitMode || 'client'
-    form.proxyProtocolVersion = c.transport.proxyProtocolVersion || ''
+    form.proxyProtocolVersion =
+      c.transport.proxyProtocol || c.transport.proxyProtocolVersion || ''
+    form.proxyProtocolMode =
+      (form.type === 'udp' || form.type === 'sudp') &&
+      (form.proxyProtocolVersion === 'v1' ||
+        form.proxyProtocolVersion === 'v2')
+        ? c.transport.proxyProtocolMode || ''
+        : ''
+    form.socketMark =
+      form.proxyProtocolVersion === 'tproxy'
+        ? c.transport.socketMark
+        : undefined
   }
 
   // Load Balancer

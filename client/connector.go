@@ -148,11 +148,18 @@ func (c *defaultConnectorImpl) Open() error {
 		}
 		if tlsConfig == nil {
 			// QUIC always runs over TLS.
-			sn := c.cfg.Transport.TLS.ServerName
+			tlsCfg := c.cfg.Transport.TLS
+			sn := tlsCfg.ServerName
 			if sn == "" {
 				sn = c.cfg.ServerAddr
 			}
-			tlsConfig, err = transport.NewClientTLSConfig("", "", "", sn)
+			tlsConfig, err = transport.NewClientTLSConfigWithSystemCA(
+				tlsCfg.CertFile,
+				tlsCfg.KeyFile,
+				tlsCfg.TrustedCaFile,
+				sn,
+				tlsCfg.UseSystemCa,
+			)
 			if err != nil {
 				xl.Warnf("fail to build tls configuration, err: %v", err)
 				return err
@@ -302,7 +309,8 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 		protocol = "tcp"
 		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{Hook: netpkg.DialHookWebsocket(protocol, ""), Priority: 15}))
 		dialOptions = append(dialOptions, libnet.WithAfterHook(libnet.AfterHook{
-			Hook: netpkg.DialHookCustomTLSHeadByte(tlsConfig != nil, lo.FromPtr(c.cfg.Transport.TLS.DisableCustomTLSFirstByte)),
+			Hook:     netpkg.DialHookCustomTLSHeadByte(tlsConfig != nil, lo.FromPtr(c.cfg.Transport.TLS.DisableCustomTLSFirstByte)),
+			Priority: 20,
 		}))
 		dialOptions = append(dialOptions, libnet.WithTLSConfig(tlsConfig))
 	case "wss":

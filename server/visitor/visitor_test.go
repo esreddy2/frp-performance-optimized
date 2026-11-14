@@ -64,3 +64,62 @@ func TestManagerNewConnCarriesWireProtocolAndUDPPacketCodec(t *testing.T) {
 	require.Equal(t, wire.UDPPacketCodecBinary, metadata.UDPPacketCodec())
 	require.NoError(t, <-errCh)
 }
+
+func TestManagerAuthAllowUsersEncryptionCompressionAndLifecycle(t *testing.T) {
+	require := require.New(t)
+	vm := NewManager()
+
+	ln, err := vm.Listen("stcp-svc", "secret-key", []string{"alice", "bob"})
+	require.NoError(err)
+
+	// Duplicate Listen on same name is rejected
+	_, err = vm.Listen("stcp-svc", "secret-key", []string{"*"})
+	require.ErrorContains(err, "is repeated")
+
+	now := time.Now().Unix()
+	validSign := util.GetAuthKey("secret-key", now)
+
+	// Non-existent listener
+	c1, s1 := net.Pipe()
+	defer c1.Close()
+	defer s1.Close()
+	err = vm.NewConn("unknown-svc", s1, now, validSign, false, false, "alice", wire.ProtocolV1)
+	require.ErrorContains(err, "doesn't exist")
+
+	// Invalid auth signature
+	err = vm.NewConn("stcp-svc", s1, now, "bad-signature", false, false, "alice", wire.ProtocolV1)
+	require.ErrorContains(err, "auth failed")
+
+	// Unauthorized user (when allowUsers does not contain "*")
+	err = vm.NewConn("stcp-svc", s1, now, validSign, false, false, "mallory", wire.ProtocolV1)
+	require.ErrorContains(err, "not allowed")
+
+	// Authorized user with both encryption and compression enabled
+	clientRaw, serverRaw := net.Pipe()
+	defer clientRaw.Close()
+	defer serverRaw.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- vm.NewConn("stcp-svc", serverRaw, now, validSign, true, true, "bob", wire.ProtocolV1)
+	}()
+
+	accepted, err := ln.Accept()
+	require.NoError(err)
+	require.NoError(<-errCh)
+	defer accepted.Close()
+
+	// CloseListener removes only that listener and unblocks Accept
+	vm.CloseListener("stcp-svc")
+	_, err = ln.Accept()
+	require.Error(err)
+
+	// After CloseListener, a new listener with the same name can be registered
+	ln2, err := vm.Listen("stcp-svc", "secret-key-2", []string{"*"})
+	require.NoError(err)
+
+	// Close shuts down all remaining listeners
+	require.NoError(vm.Close())
+	_, err = ln2.Accept()
+	require.Error(err)
+}

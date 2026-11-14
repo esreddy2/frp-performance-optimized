@@ -166,3 +166,183 @@ func TestValidateClientFeatureGatesAreConfigScoped(t *testing.T) {
 	require.ErrorContains(t, err, "VirtualNet feature is not enabled")
 	require.Equal(t, defaultGatesBefore, featuregate.DefaultFeatureGates.String())
 }
+
+func TestValidateClientAuthAndOIDC(t *testing.T) {
+	t.Run("invalid auth method and scopes", func(t *testing.T) {
+		cfg := &v1.ClientCommonConfig{}
+		require.NoError(t, cfg.Complete())
+		cfg.Auth.Method = "invalid"
+		cfg.Auth.AdditionalScopes = []v1.AuthScope{"InvalidScope"}
+
+		_, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
+		require.ErrorContains(t, err, "invalid auth method")
+		require.ErrorContains(t, err, "invalid auth additional scopes")
+	})
+
+	t.Run("oidc client credentials validation", func(t *testing.T) {
+		cfg := &v1.ClientCommonConfig{}
+		require.NoError(t, cfg.Complete())
+		cfg.Auth.Method = v1.AuthMethodOIDC
+
+		_, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
+		require.Error(t, err)
+	})
+
+	t.Run("oidc tokenSource mutual exclusivity and exec unsafe feature", func(t *testing.T) {
+		cfg := &v1.ClientCommonConfig{}
+		require.NoError(t, cfg.Complete())
+		cfg.Auth.Method = v1.AuthMethodOIDC
+		cfg.Auth.OIDC.ClientID = "id"
+		cfg.Auth.OIDC.TokenSource = &v1.ValueSource{
+			Type: "exec",
+		}
+
+		_, err := NewConfigValidator(security.NewUnsafeFeatures(nil)).ValidateClientCommonConfig(cfg)
+		require.ErrorContains(t, err, "cannot specify both auth.oidc.tokenSource and any other field of auth.oidc")
+		require.ErrorContains(t, err, "TokenSourceExec")
+		require.ErrorContains(t, err, "invalid auth.oidc.tokenSource")
+	})
+}
+
+func TestValidateClientTransportAndIncludeFiles(t *testing.T) {
+	t.Run("heartbeat timeout less than interval", func(t *testing.T) {
+		cfg := &v1.ClientCommonConfig{}
+		require.NoError(t, cfg.Complete())
+		cfg.Transport.HeartbeatInterval = 30
+		cfg.Transport.HeartbeatTimeout = 10
+
+		_, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
+		require.ErrorContains(t, err, "invalid transport.heartbeatTimeout")
+	})
+
+	t.Run("tls files warning when tls disabled", func(t *testing.T) {
+		disabled := false
+		cfg := &v1.ClientCommonConfig{}
+		require.NoError(t, cfg.Complete())
+		cfg.Transport.Protocol = "tcp"
+		cfg.Transport.TLS.Enable = &disabled
+		cfg.Transport.TLS.CertFile = "cert.pem"
+		cfg.Transport.TLS.KeyFile = "key.pem"
+		cfg.Transport.TLS.TrustedCaFile = "ca.pem"
+
+		warn, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
+		require.NoError(t, err)
+		require.ErrorContains(t, warn, "transport.tls.certFile is invalid when transport.tls.enable is false")
+		require.ErrorContains(t, warn, "transport.tls.keyFile is invalid when transport.tls.enable is false")
+		require.ErrorContains(t, warn, "transport.tls.trustedCaFile is invalid when transport.tls.enable is false")
+	})
+
+	t.Run("invalid protocol, wireProtocol, quic options, tcp buffer options", func(t *testing.T) {
+		cfg := &v1.ClientCommonConfig{}
+		require.NoError(t, cfg.Complete())
+		cfg.Transport.Protocol = "invalid"
+		cfg.Transport.WireProtocol = "v99"
+		cfg.Transport.TCPNotSentLowat = -1
+
+		_, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
+		require.ErrorContains(t, err, "invalid transport.protocol")
+		require.ErrorContains(t, err, "invalid transport.wireProtocol")
+		require.ErrorContains(t, err, "invalid transport.tcpNotSentLowat")
+
+		cfgQuic := &v1.ClientCommonConfig{}
+		require.NoError(t, cfgQuic.Complete())
+		cfgQuic.Transport.Protocol = "quic"
+		cfgQuic.Transport.QUIC.KeepalivePeriod = -1
+		_, err = NewConfigValidator(nil).ValidateClientCommonConfig(cfgQuic)
+		require.ErrorContains(t, err, "invalid transport.quic options")
+	})
+
+	t.Run("wireProtocol v2 security warning", func(t *testing.T) {
+		disabled := false
+		cfg := &v1.ClientCommonConfig{}
+		require.NoError(t, cfg.Complete())
+		cfg.Transport.Protocol = "tcp"
+		cfg.Transport.WireProtocol = "v2"
+		cfg.Transport.RequireKeyShare = false
+		cfg.Transport.TLS.Enable = &disabled
+		cfg.Auth.Method = v1.AuthMethodOIDC
+		cfg.Auth.OIDC.ClientID = "id"
+		cfg.Auth.OIDC.ClientSecret = "secret"
+		cfg.Auth.OIDC.TokenEndpointURL = "https://idp.example.com/token"
+
+		warn, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
+		require.NoError(t, err)
+		require.ErrorContains(t, warn, "transport.wireProtocol is 'v2' over unencrypted transport")
+	})
+
+	t.Run("include files directory validation", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &v1.ClientCommonConfig{
+			IncludeConfigFiles: []string{dir + "/*.toml", "/nonexistent_dir_frp_test_12345/*.toml"},
+		}
+		require.NoError(t, cfg.Complete())
+
+		_, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
+		require.ErrorContains(t, err, "not exist")
+	})
+}
+
+func TestValidateAllClientConfig(t *testing.T) {
+	common := &v1.ClientCommonConfig{User: "alice"}
+	require.NoError(t, common.Complete())
+
+	tcpProxy := &v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name: "p1",
+			Type: "tcp",
+			ProxyBackend: v1.ProxyBackend{
+				LocalPort: 8080,
+			},
+		},
+	}
+	tcpProxy.Complete()
+
+	stcpVisitor := &v1.STCPVisitorConfig{
+		VisitorBaseConfig: v1.VisitorBaseConfig{
+			Name:       "v1",
+			Type:       "stcp",
+			ServerName: "s1",
+			BindPort:   9000,
+		},
+	}
+	stcpVisitor.Complete()
+
+	warn, err := ValidateAllClientConfig(common, []v1.ProxyConfigurer{tcpProxy}, []v1.VisitorConfigurer{stcpVisitor}, nil)
+	require.NoError(t, err)
+	require.NoError(t, warn)
+
+	// UDP proxy with QUICDatagrams on non-quic transport fails
+	udpProxy := &v1.UDPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name: "u1",
+			Type: "udp",
+			ProxyBackend: v1.ProxyBackend{
+				LocalPort: 5353,
+			},
+		},
+		QUICDatagrams: true,
+	}
+	udpProxy.Complete()
+	_, err = ValidateAllClientConfig(common, []v1.ProxyConfigurer{udpProxy}, nil, nil)
+	require.ErrorContains(t, err, "quicDatagrams requires transport.protocol to be quic")
+
+	// Invalid proxy fails
+	badProxy := &v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name: "bad",
+			Type: "tcp",
+		},
+	}
+	_, err = ValidateAllClientConfig(common, []v1.ProxyConfigurer{badProxy}, nil, nil)
+	require.ErrorContains(t, err, "proxy bad:")
+
+	// Invalid visitor fails
+	badVisitor := &v1.STCPVisitorConfig{
+		VisitorBaseConfig: v1.VisitorBaseConfig{
+			Name: "badv",
+			Type: "stcp",
+		},
+	}
+	_, err = ValidateAllClientConfig(common, nil, []v1.VisitorConfigurer{badVisitor}, nil)
+	require.ErrorContains(t, err, "visitor badv:")
+}

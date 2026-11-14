@@ -184,25 +184,29 @@ func (v *Muxer) handle(c net.Conn) {
 	l, ok := v.getListener(name, path, httpUser)
 	if !ok {
 		log.Debugf("http request for host [%s] path [%s] httpUser [%s] not found", name, path, httpUser)
-		v.failHook(sConn)
+		if v.failHook != nil {
+			v.failHook(sConn)
+		} else {
+			_ = sConn.Close()
+		}
 		return
 	}
 
 	xl := xlog.FromContextSafe(l.ctx)
-	if v.successHook != nil {
-		if err := v.successHook(c, reqInfoMap); err != nil {
-			xl.Infof("success func failure on vhost connection: %v", err)
-			_ = c.Close()
-			return
-		}
-	}
-
 	// if checkAuth func is exist and username/password is set
 	// then verify user access
 	if l.mux.checkAuth != nil && l.username != "" {
 		ok, err := l.mux.checkAuth(c, l.username, l.password, reqInfoMap)
 		if !ok || err != nil {
 			xl.Debugf("auth failed for user: %s", l.username)
+			_ = c.Close()
+			return
+		}
+	}
+
+	if v.successHook != nil {
+		if err := v.successHook(c, reqInfoMap); err != nil {
+			xl.Infof("success func failure on vhost connection: %v", err)
 			_ = c.Close()
 			return
 		}
@@ -254,6 +258,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 		sConn, err := l.mux.rewriteHost(conn, l.rewriteHost)
 		if err != nil {
 			xl.Warnf("host header rewrite failed: %v", err)
+			_ = conn.Close()
 			return nil, fmt.Errorf("host header rewrite failed")
 		}
 		xl.Debugf("rewrite host to [%s] success", l.rewriteHost)

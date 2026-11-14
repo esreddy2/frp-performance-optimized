@@ -94,24 +94,18 @@ func (c *FakeUDPConn) touch() {
 
 func (c *FakeUDPConn) putPacket(content []byte) {
 	c.mu.RLock()
-	closed := c.closeFlag
-	c.mu.RUnlock()
-	if closed {
+	if c.closeFlag {
+		c.mu.RUnlock()
 		pool.PutBuf(content)
 		return
 	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			pool.PutBuf(content)
-		}
-	}()
 
 	select {
 	case c.packets <- content:
 	default:
 		pool.PutBuf(content)
 	}
+	c.mu.RUnlock()
 }
 
 func (c *FakeUDPConn) Read(b []byte) (n int, err error) {
@@ -156,12 +150,7 @@ func (c *FakeUDPConn) Close() error {
 	c.mu.Lock()
 	if !c.closeFlag {
 		c.closeFlag = true
-		func() {
-			defer func() {
-				_ = recover()
-			}()
-			close(c.packets)
-		}()
+		close(c.packets)
 	}
 	c.mu.Unlock()
 
@@ -245,6 +234,9 @@ func ListenUDP(bindAddr string, bindPort int) (l *UDPListener, err error) {
 	readConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return l, err
+	}
+	if localUDPAddr, ok := readConn.LocalAddr().(*net.UDPAddr); ok {
+		udpAddr = localUDPAddr
 	}
 
 	l = &UDPListener{

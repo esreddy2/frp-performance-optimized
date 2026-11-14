@@ -206,7 +206,10 @@ func TestSUDPProxyRetirementDoesNotRaceWithTheReader(t *testing.T) {
 	// on the read channel of the proxy.
 	rw, err := msg.NewUDPPacketReadWriter(client, "", "")
 	require.NoError(err)
-	require.NoError(msg.NewConn(client, rw).WriteMsg(&msg.UDPPacket{Content: []byte("payload")}))
+	require.NoError(msg.NewConn(client, rw).WriteMsg(&msg.UDPPacket{
+		Content:    []byte("payload"),
+		RemoteAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+	}))
 
 	// The local service received the packet, so the reader has sent it on
 	// the read channel of the proxy.

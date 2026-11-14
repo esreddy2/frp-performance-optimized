@@ -402,3 +402,37 @@ func generateTestCertificate(t *testing.T) tls.Certificate {
 
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
+
+func TestEncodeDgramFramePooledReuse(t *testing.T) {
+	require := require.New(t)
+
+	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 7), Port: 4242}
+	payload := make([]byte, 512)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	bp, frame, err := encodeDgramFramePooled("proxy-a", addr, payload)
+	require.NoError(err)
+	require.NotNil(bp)
+	frameCap := cap(frame)
+	require.GreaterOrEqual(frameCap, len(frame))
+
+	*bp = frame[:0]
+	require.Empty(*bp)
+	require.Equal(frameCap, cap(*bp))
+	dgramFramePool.Put(bp)
+
+	// Subsequent encode with a smaller payload should still succeed and decode cleanly.
+	bp2, frame2, err := encodeDgramFramePooled("proxy-a", addr, []byte("small"))
+	require.NoError(err)
+	require.NotNil(bp2)
+	name, gotAddr, gotPayload, err := decodeDgramFrame(frame2)
+	require.NoError(err)
+	require.Equal("proxy-a", name)
+	require.Equal(addr.String(), gotAddr.String())
+	require.Equal([]byte("small"), gotPayload)
+
+	*bp2 = frame2[:0]
+	dgramFramePool.Put(bp2)
+}

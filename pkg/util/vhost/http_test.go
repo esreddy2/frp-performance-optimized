@@ -2,11 +2,16 @@ package vhost
 
 import (
 	"bufio"
+	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -428,4 +433,194 @@ func TestGetRequestRouteUser(t *testing.T) {
 
 		require.Empty(t, getRequestRouteUser(req))
 	})
+}
+
+func TestHTTPSMuxerAndMuxerLifecycle(t *testing.T) {
+	require := require.New(t)
+
+	// 1. HTTPSMuxer SNI routing & unrecognized SNI failHook
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(err)
+	httpsMux, err := NewHTTPSMuxer(rawLn, 2*time.Second)
+	require.NoError(err)
+	defer httpsMux.Close()
+
+	vhostLn, err := httpsMux.Listen(context.Background(), &RouteConfig{
+		Domain: "secure.example.com",
+	})
+	require.NoError(err)
+	defer vhostLn.Close()
+	require.Equal("secure.example.com", vhostLn.Name())
+	require.Nil(vhostLn.Addr())
+
+	acceptedCh := make(chan net.Conn, 1)
+	go func() {
+		c, acceptErr := vhostLn.Accept()
+		if acceptErr == nil {
+			acceptedCh <- c
+		}
+	}()
+
+	// Dial with matching SNI
+	go func() {
+		conn, dialErr := net.Dial("tcp", rawLn.Addr().String())
+		if dialErr != nil {
+			return
+		}
+		defer conn.Close()
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName:         "secure.example.com",
+			InsecureSkipVerify: true,
+		})
+		_ = tlsConn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+		_ = tlsConn.Handshake()
+	}()
+
+	select {
+	case c := <-acceptedCh:
+		_ = c.Close()
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for HTTPSMuxer SNI connection")
+	}
+
+	// Dial with unknown SNI triggers vhostFailed without panic
+	unknownConn, err := net.Dial("tcp", rawLn.Addr().String())
+	require.NoError(err)
+	unknownTLS := tls.Client(unknownConn, &tls.Config{
+		ServerName:         "unknown.example.com",
+		InsecureSkipVerify: true,
+	})
+	_ = unknownTLS.SetDeadline(time.Now().Add(time.Second))
+	require.Error(unknownTLS.Handshake())
+	_ = unknownConn.Close()
+
+	// 2. Custom Muxer without failHook (nil failHook safety), auth check, successHook, and rewriteHost error cleanup
+	internalLn := netpkg.NewInternalListener()
+	mux, err := NewMuxer(internalLn, func(c net.Conn) (net.Conn, map[string]string, error) {
+		return c, map[string]string{"Host": "app.example.com", "Path": "/api", "HTTPUser": "u1"}, nil
+	}, time.Second)
+	require.NoError(err)
+	defer mux.Close()
+
+	// Route miss with nil failHook closes connection instead of panicking
+	c1, s1 := net.Pipe()
+	defer c1.Close()
+	require.NoError(internalLn.PutConn(s1))
+	_ = c1.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 1)
+	_, err = c1.Read(buf)
+	require.ErrorIs(err, io.EOF)
+
+	// Register listener with auth, successHook, and rewriteHost
+	var allowAuth atomic.Bool
+	var allowSuccess atomic.Bool
+	var failRewrite atomic.Bool
+	allowAuth.Store(true)
+	allowSuccess.Store(true)
+
+	mux.SetCheckAuthFunc(func(_ net.Conn, username, password string, _ map[string]string) (bool, error) {
+		return allowAuth.Load() && username == "admin" && password == "secret", nil
+	})
+	mux.SetSuccessHookFunc(func(_ net.Conn, _ map[string]string) error {
+		if !allowSuccess.Load() {
+			return errors.New("hook failed")
+		}
+		return nil
+	})
+	mux.SetRewriteHostFunc(func(c net.Conn, rewrite string) (net.Conn, error) {
+		if failRewrite.Load() {
+			return nil, errors.New("rewrite error")
+		}
+		return c, nil
+	})
+
+	routeLn, err := mux.Listen(context.Background(), &RouteConfig{
+		Domain:          "app.example.com",
+		Location:        "/api",
+		RouteByHTTPUser: "u1",
+		RewriteHost:     "internal.example.com",
+		Username:        "admin",
+		Password:        "secret",
+	})
+	require.NoError(err)
+
+	// Auth failure closes conn
+	allowAuth.Store(false)
+	c2, s2 := net.Pipe()
+	defer c2.Close()
+	require.NoError(internalLn.PutConn(s2))
+	_ = c2.SetReadDeadline(time.Now().Add(time.Second))
+	_, err = c2.Read(buf)
+	require.ErrorIs(err, io.EOF)
+	allowAuth.Store(true)
+
+	// SuccessHook failure closes conn
+	allowSuccess.Store(false)
+	c3, s3 := net.Pipe()
+	defer c3.Close()
+	require.NoError(internalLn.PutConn(s3))
+	_ = c3.SetReadDeadline(time.Now().Add(time.Second))
+	_, err = c3.Read(buf)
+	require.ErrorIs(err, io.EOF)
+	allowSuccess.Store(true)
+
+	// RewriteHost failure returns error on Accept and closes underlying conn
+	failRewrite.Store(true)
+	c4, s4 := net.Pipe()
+	defer c4.Close()
+	trackedS4 := &connectTestConn{Conn: s4}
+	require.NoError(internalLn.PutConn(trackedS4))
+	_, err = routeLn.Accept()
+	require.ErrorContains(err, "host header rewrite failed")
+	require.True(trackedS4.closed.Load())
+	failRewrite.Store(false)
+
+	// Successful Accept with rewriteHost
+	c5, s5 := net.Pipe()
+	defer c5.Close()
+	require.NoError(internalLn.PutConn(s5))
+	accepted, err := routeLn.Accept()
+	require.NoError(err)
+	_ = accepted.Close()
+
+	// Closing routeLn unblocks Accept
+	require.NoError(routeLn.Close())
+	_, err = routeLn.Accept()
+	require.ErrorContains(err, "listener closed")
+}
+
+func TestNotFoundResponse(t *testing.T) {
+	require := require.New(t)
+
+	origPath := NotFoundPagePath
+	defer func() {
+		NotFoundPagePath = origPath
+	}()
+
+	// Default 404 response
+	NotFoundPagePath = ""
+	resp := NotFoundResponse()
+	require.Equal(http.StatusNotFound, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(err)
+	_ = resp.Body.Close()
+	require.Contains(string(body), "The page you requested was not found")
+
+	// Custom 404 file
+	customFile := filepath.Join(t.TempDir(), "404.html")
+	require.NoError(os.WriteFile(customFile, []byte("<h1>Custom 404</h1>"), 0o600))
+	NotFoundPagePath = customFile
+	customResp := NotFoundResponse()
+	customBody, err := io.ReadAll(customResp.Body)
+	require.NoError(err)
+	_ = customResp.Body.Close()
+	require.Equal("<h1>Custom 404</h1>", string(customBody))
+
+	// Missing custom 404 file falls back to default NotFound content
+	NotFoundPagePath = filepath.Join(t.TempDir(), "nonexistent.html")
+	fallbackResp := NotFoundResponse()
+	fallbackBody, err := io.ReadAll(fallbackResp.Body)
+	require.NoError(err)
+	_ = fallbackResp.Body.Close()
+	require.Contains(string(fallbackBody), "The page you requested was not found")
 }

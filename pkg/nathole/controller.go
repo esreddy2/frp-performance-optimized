@@ -16,7 +16,7 @@ package nathole
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -72,7 +72,7 @@ type Session struct {
 }
 
 func (s *Session) genAnalysisKey() {
-	hash := md5.New()
+	hash := sha256.New()
 	vIPs := slices.Compact(parseIPs(s.visitorMsg.MappedAddrs))
 	if len(vIPs) > 0 {
 		hash.Write([]byte(vIPs[0]))

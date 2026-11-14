@@ -19,8 +19,6 @@ import (
 	"reflect"
 	"sync"
 
-	"github.com/fatedier/golib/errors"
-
 	"github.com/fatedier/frp/pkg/msg"
 )
 
@@ -62,7 +60,6 @@ func (impl *transporterImpl) Send(m msg.Message) error {
 
 func (impl *transporterImpl) Do(ctx context.Context, req msg.Message, laneKey, recvMsgType string) (msg.Message, error) {
 	ch := make(chan msg.Message, 1)
-	defer close(ch)
 	unregisterFn := impl.registerMsgChan(ch, laneKey, recvMsgType)
 	defer unregisterFn()
 
@@ -91,12 +88,12 @@ func (impl *transporterImpl) DispatchWithType(m msg.Message, msgType, laneKey st
 		return false
 	}
 
-	if err := errors.PanicToError(func() {
-		ch <- m
-	}); err != nil {
+	select {
+	case ch <- m:
+		return true
+	default:
 		return false
 	}
-	return true
 }
 
 func (impl *transporterImpl) Dispatch(m msg.Message, laneKey string) bool {
@@ -116,7 +113,12 @@ func (impl *transporterImpl) registerMsgChan(recvCh chan msg.Message, laneKey st
 
 	unregister = func() {
 		impl.mu.Lock()
-		delete(byLaneKey, laneKey)
+		if cur, ok := byLaneKey[laneKey]; ok && cur == recvCh {
+			delete(byLaneKey, laneKey)
+			if len(byLaneKey) == 0 {
+				delete(impl.registry, msgType)
+			}
+		}
 		impl.mu.Unlock()
 	}
 	return

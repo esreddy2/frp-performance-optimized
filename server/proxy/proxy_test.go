@@ -23,9 +23,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/fatedier/frp/pkg/config/types"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
+	"github.com/fatedier/frp/pkg/nathole"
+	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/proto/wire"
+	"github.com/fatedier/frp/pkg/util/tcpmux"
+	"github.com/fatedier/frp/pkg/util/vhost"
+	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/group"
+	"github.com/fatedier/frp/server/ports"
+	"github.com/fatedier/frp/server/visitor"
 )
 
 func TestWorkConnStartWritesStartWorkConn(t *testing.T) {
@@ -177,4 +186,328 @@ func getStartWorkConnFromPool(t *testing.T, cfg v1.ProxyConfigurer, wireProtocol
 	require.NoError(t, clientMsgConn.ReadMsgInto(&startMsg))
 	require.NoError(t, <-errCh)
 	return startMsg
+}
+
+func TestManagerAddExistGetAndDel(t *testing.T) {
+	require := require.New(t)
+	pm := NewManager()
+
+	bw, err := types.NewBandwidthQuantity("1MB")
+	require.NoError(err)
+
+	cfg := &v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name: "p1",
+			Type: string(v1.ProxyTypeTCP),
+			Transport: v1.ProxyTransport{
+				BandwidthLimit:     bw,
+				BandwidthLimitMode: types.BandwidthLimitModeServer,
+			},
+		},
+	}
+	rc := &controller.ResourceController{}
+	userInfo := plugin.UserInfo{User: "alice"}
+	loginMsg := &msg.Login{User: "alice"}
+
+	pxy, err := NewProxy(context.Background(), &Options{
+		UserInfo:           userInfo,
+		LoginMsg:           loginMsg,
+		PoolCount:          1,
+		ResourceController: rc,
+		Configurer:         cfg,
+		ServerCfg:          &v1.ServerConfig{SubDomainHost: "frps.com"},
+	})
+	require.NoError(err)
+	require.Equal("p1", pxy.GetName())
+	require.Equal(1, pxy.GetUsedPortsNum())
+	require.Same(rc, pxy.GetResourceController())
+	require.Equal(userInfo, pxy.GetUserInfo())
+	require.Same(loginMsg, pxy.GetLoginMsg())
+	require.NotNil(pxy.GetLimiter())
+	require.Same(cfg, pxy.GetConfigurer())
+	require.NotNil(pxy.Context())
+
+	require.False(pm.Exist("p1"))
+	require.NoError(pm.Add("p1", pxy))
+	require.True(pm.Exist("p1"))
+
+	// Duplicate Add must error
+	require.ErrorContains(pm.Add("p1", pxy), "already in use")
+
+	got, ok := pm.GetByName("p1")
+	require.True(ok)
+	require.Same(pxy, got)
+
+	pm.Del("p1")
+	require.False(pm.Exist("p1"))
+	_, ok = pm.GetByName("p1")
+	require.False(ok)
+}
+
+func TestAllProxyTypesRunAndClose(t *testing.T) {
+	require := require.New(t)
+
+	tcpPM := ports.NewManager("tcp", "127.0.0.1", []types.PortsRange{{Start: 42000, End: 42100}})
+	defer tcpPM.Close()
+	udpPM := ports.NewManager("udp", "127.0.0.1", []types.PortsRange{{Start: 42101, End: 42200}})
+	defer udpPM.Close()
+
+	routers := vhost.NewRouters()
+	rp := vhost.NewHTTPReverseProxy(vhost.HTTPReverseProxyOptions{}, routers)
+
+	httpsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(err)
+	defer httpsLn.Close()
+	httpsMuxer, err := vhost.NewHTTPSMuxer(httpsLn, time.Second)
+	require.NoError(err)
+
+	muxLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(err)
+	defer muxLn.Close()
+	httpConnectMuxer, err := tcpmux.NewHTTPConnectTCPMuxer(muxLn, false, time.Second)
+	require.NoError(err)
+
+	nhc, err := nathole.NewController(time.Minute)
+	require.NoError(err)
+
+	rc := &controller.ResourceController{
+		VisitorManager:         visitor.NewManager(),
+		TCPPortManager:         tcpPM,
+		UDPPortManager:         udpPM,
+		TCPGroupCtl:            group.NewTCPGroupCtl(tcpPM),
+		HTTPGroupCtl:           group.NewHTTPGroupController(routers),
+		HTTPSGroupCtl:          group.NewHTTPSGroupController(httpsMuxer),
+		TCPMuxGroupCtl:         group.NewTCPMuxGroupCtl(httpConnectMuxer),
+		HTTPReverseProxy:       rp,
+		VhostHTTPSMuxer:        httpsMuxer,
+		TCPMuxHTTPConnectMuxer: httpConnectMuxer,
+		NatHoleController:      nhc,
+		PluginManager:          plugin.NewManager(),
+	}
+
+	serverCfg := &v1.ServerConfig{
+		ProxyBindAddr:         "127.0.0.1",
+		SubDomainHost:         "example.com",
+		VhostHTTPPort:         8080,
+		VhostHTTPSPort:        8443,
+		TCPMuxHTTPConnectPort: 8888,
+	}
+
+	newOpts := func(cfg v1.ProxyConfigurer) *Options {
+		return &Options{
+			UserInfo:           plugin.UserInfo{User: "u1"},
+			LoginMsg:           &msg.Login{User: "u1"},
+			PoolCount:          1,
+			ResourceController: rc,
+			Configurer:         cfg,
+			ServerCfg:          serverCfg,
+			EncryptionKey:      []byte("secret-key"),
+			WireProtocol:       wire.ProtocolV2,
+			GetWorkConnFn: func() (*WorkConn, error) {
+				c1, c2 := net.Pipe()
+				go func() {
+					clientMsg := msg.NewConn(c1, msg.NewV2ReadWriter(c1))
+					var start msg.StartWorkConn
+					_ = clientMsg.ReadMsgInto(&start)
+					_ = c1.Close()
+				}()
+				return NewWorkConn(msg.NewConn(c2, msg.NewV2ReadWriter(c2))), nil
+			},
+		}
+	}
+
+	// 1. Standalone TCPProxy & Grouped TCPProxy
+	tcpPxy, err := NewProxy(context.Background(), newOpts(&v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{Name: "tcp-1", Type: "tcp"},
+	}))
+	require.NoError(err)
+	addr, err := tcpPxy.Run()
+	require.NoError(err)
+	require.NotEmpty(addr)
+	tcpPxy.Close()
+
+	tcpGrpPxy, err := NewProxy(context.Background(), newOpts(&v1.TCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name:         "tcp-grp-1",
+			Type:         "tcp",
+			LoadBalancer: v1.LoadBalancerConfig{Group: "g1", GroupKey: "k1"},
+		},
+	}))
+	require.NoError(err)
+	addr, err = tcpGrpPxy.Run()
+	require.NoError(err)
+	require.NotEmpty(addr)
+	tcpGrpPxy.Close()
+
+	// 2. HTTPProxy (standalone, grouped, and GetRealConn)
+	httpPxy, err := NewProxy(context.Background(), newOpts(&v1.HTTPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name:      "http-1",
+			Type:      "http",
+			Transport: v1.ProxyTransport{UseEncryption: true, UseCompression: true},
+		},
+		DomainConfig: v1.DomainConfig{CustomDomains: []string{"a.example.com"}, SubDomain: "sub"},
+	}))
+	require.NoError(err)
+	addr, err = httpPxy.Run()
+	require.NoError(err)
+	require.Contains(addr, "a.example.com:8080")
+	require.Contains(addr, "sub.example.com:8080")
+
+	realConn, err := httpPxy.(*HTTPProxy).GetRealConn("127.0.0.1:54321")
+	require.NoError(err)
+	_ = realConn.Close()
+	httpPxy.Close()
+
+	// 3. HTTPSProxy (standalone and grouped)
+	httpsPxy, err := NewProxy(context.Background(), newOpts(&v1.HTTPSProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name:         "https-1",
+			Type:         "https",
+			LoadBalancer: v1.LoadBalancerConfig{Group: "hg1", GroupKey: "hk1"},
+		},
+		DomainConfig: v1.DomainConfig{CustomDomains: []string{"sec.example.com"}},
+	}))
+	require.NoError(err)
+	addr, err = httpsPxy.Run()
+	require.NoError(err)
+	require.Contains(addr, "sec.example.com:8443")
+	httpsPxy.Close()
+
+	// 4. TCPMuxProxy (httpconnect & invalid multiplexer)
+	muxPxy, err := NewProxy(context.Background(), newOpts(&v1.TCPMuxProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{Name: "mux-1", Type: "tcpmux"},
+		DomainConfig:    v1.DomainConfig{CustomDomains: []string{"mux.example.com"}},
+		Multiplexer:     string(v1.TCPMultiplexerHTTPConnect),
+	}))
+	require.NoError(err)
+	addr, err = muxPxy.Run()
+	require.NoError(err)
+	require.Contains(addr, "mux.example.com:8888")
+	muxPxy.Close()
+
+	badMuxPxy, err := NewProxy(context.Background(), newOpts(&v1.TCPMuxProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{Name: "mux-bad", Type: "tcpmux"},
+		Multiplexer:     "invalid",
+	}))
+	require.NoError(err)
+	_, err = badMuxPxy.Run()
+	require.ErrorContains(err, "unknown multiplexer")
+
+	// 5. STCPProxy & SUDPProxy
+	stcpPxy, err := NewProxy(context.Background(), newOpts(&v1.STCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{Name: "stcp-1", Type: "stcp"},
+		Secretkey:       "sk",
+	}))
+	require.NoError(err)
+	_, err = stcpPxy.Run()
+	require.NoError(err)
+	stcpPxy.Close()
+
+	sudpPxy, err := NewProxy(context.Background(), newOpts(&v1.SUDPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{Name: "sudp-1", Type: "sudp"},
+		Secretkey:       "sk",
+	}))
+	require.NoError(err)
+	_, err = sudpPxy.Run()
+	require.NoError(err)
+	sudpPxy.Close()
+
+	// 6. XTCPProxy
+	xtcpPxy, err := NewProxy(context.Background(), newOpts(&v1.XTCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{Name: "xtcp-1", Type: "xtcp"},
+		Secretkey:       "sk",
+	}))
+	require.NoError(err)
+	_, err = xtcpPxy.Run()
+	require.NoError(err)
+	xtcpPxy.Close()
+}
+
+func TestSUDPMixedPacketEncodingAndBridge(t *testing.T) {
+	require := require.New(t)
+
+	// Codec normalization validation
+	_, err := normalizeUDPPacketCodec(wire.ProtocolV1, wire.UDPPacketCodecBinary)
+	require.ErrorContains(err, "requires wire protocol v2")
+	_, err = normalizeUDPPacketCodec(wire.ProtocolV2, "unknown-codec")
+	require.ErrorContains(err, "unsupported UDP packet codec")
+	_, err = normalizeUDPPacketCodec("v99", "")
+	require.ErrorContains(err, "unsupported wire protocol")
+
+	mixed, err := isMixedSUDPPacketEncoding(wire.ProtocolV1, "", wire.ProtocolV2, wire.UDPPacketCodecBinary)
+	require.NoError(err)
+	require.True(mixed)
+
+	mixed, err = isMixedSUDPPacketEncoding(wire.ProtocolV2, wire.UDPPacketCodecBinary, wire.ProtocolV2, wire.UDPPacketCodecBinary)
+	require.NoError(err)
+	require.False(mixed)
+
+	// Bridge between v1 proxy and v2+binary visitor
+	proxyClient, proxyServer := net.Pipe()
+	visitorClient, visitorServer := net.Pipe()
+	defer proxyClient.Close()
+	defer proxyServer.Close()
+	defer visitorClient.Close()
+	defer visitorServer.Close()
+
+	proxyRW, err := msg.NewUDPPacketReadWriter(proxyClient, wire.ProtocolV1, "")
+	require.NoError(err)
+	visitorRW, err := msg.NewUDPPacketReadWriter(visitorClient, wire.ProtocolV2, wire.UDPPacketCodecBinary)
+	require.NoError(err)
+
+	done := make(chan struct{})
+	var inCount, outCount int64
+	var bridgeErrs []error
+	go func() {
+		inCount, outCount, bridgeErrs = joinSUDPMessageBridge(
+			proxyServer,
+			visitorServer,
+			wire.ProtocolV1,
+			"",
+			wire.ProtocolV2,
+			wire.UDPPacketCodecBinary,
+			nil,
+		)
+		close(done)
+	}()
+
+	remoteUDP := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9999}
+
+	// Visitor sends Ping (dropped to proxy) + UDPPacket (forwarded to proxy)
+	go func() {
+		_ = visitorRW.WriteMsg(&msg.Ping{})
+		_ = visitorRW.WriteMsg(&msg.UDPPacket{
+			Content:    []byte("hello-from-visitor"),
+			RemoteAddr: remoteUDP,
+		})
+	}()
+
+	gotAtProxy, err := proxyRW.ReadMsg()
+	require.NoError(err)
+	require.Equal([]byte("hello-from-visitor"), gotAtProxy.(*msg.UDPPacket).Content)
+
+	// Proxy sends Ping (forwarded to visitor) + UDPPacket (forwarded to visitor)
+	go func() {
+		_ = proxyRW.WriteMsg(&msg.Ping{})
+		_ = proxyRW.WriteMsg(&msg.UDPPacket{
+			Content:    []byte("reply-from-proxy"),
+			RemoteAddr: remoteUDP,
+		})
+	}()
+
+	gotPingAtVisitor, err := visitorRW.ReadMsg()
+	require.NoError(err)
+	require.IsType(&msg.Ping{}, gotPingAtVisitor)
+
+	gotPktAtVisitor, err := visitorRW.ReadMsg()
+	require.NoError(err)
+	require.Equal([]byte("reply-from-proxy"), gotPktAtVisitor.(*msg.UDPPacket).Content)
+
+	_ = proxyClient.Close()
+	_ = visitorClient.Close()
+	<-done
+	require.Empty(bridgeErrs)
+	require.Equal(int64(len("hello-from-visitor")), inCount)
+	require.Equal(int64(len("reply-from-proxy")), outCount)
 }

@@ -207,7 +207,11 @@ func (f *BoolFuncFlag) String() string {
 }
 
 func (f *BoolFuncFlag) Set(s string) error {
-	f.v = strconv.FormatBool(f.v) == "true"
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return err
+	}
+	f.v = v
 
 	if !f.v {
 		if f.FalseFunc != nil {

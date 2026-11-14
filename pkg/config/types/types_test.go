@@ -67,6 +67,9 @@ func TestBandwidthQuantity_InvalidNumber(t *testing.T) {
 func TestPortsRangeSlice2String(t *testing.T) {
 	require := require.New(t)
 
+	require.Equal("", PortsRangeSlice(nil).String())
+	require.Equal("", PortsRangeSlice{}.String())
+
 	ports := []PortsRange{
 		{
 			Start: 1000,
@@ -94,4 +97,60 @@ func TestNewPortsRangeSliceFromString(t *testing.T) {
 			Single: 3000,
 		},
 	}, ports)
+
+	// Invalid range strings must fail
+	for _, invalid := range []string{
+		"",
+		"abc",
+		"1000-abc",
+		"abc-2000",
+		"2000-1000",
+		"1000-2000-3000",
+		"1000,",
+	} {
+		_, err := NewPortsRangeSliceFromString(invalid)
+		require.Error(err, "expected error for input %q", invalid)
+	}
+}
+
+func TestBandwidthQuantityContract(t *testing.T) {
+	require := require.New(t)
+
+	// 1. NewBandwidthQuantity valid and invalid
+	q1, err := NewBandwidthQuantity("1MB")
+	require.NoError(err)
+	require.Equal("1MB", q1.String())
+	require.Equal(int64(MB), q1.Bytes())
+
+	q2, err := NewBandwidthQuantity("1024KB")
+	require.NoError(err)
+	require.Equal("1024KB", q2.String())
+	require.Equal(int64(1024*KB), q2.Bytes())
+
+	// 2. Equal checks byte equivalence and nil handling
+	require.True(q1.Equal(&q2))
+	var nilQ *BandwidthQuantity
+	require.True(nilQ.Equal(nil))
+	require.False(q1.Equal(nil))
+	require.False(nilQ.Equal(&q1))
+
+	q3, err := NewBandwidthQuantity("512KB")
+	require.NoError(err)
+	require.False(q1.Equal(&q3))
+
+	// 3. Empty string resets quantity to 0
+	qReset := q1
+	require.NoError(qReset.UnmarshalString("   "))
+	require.Equal("", qReset.String())
+	require.Equal(int64(0), qReset.Bytes())
+
+	// 4. Negative, NaN, Inf, int64-overflowing values, and non-string JSON are rejected
+	for _, bad := range []string{"-1KB", "-5MB", "NaNKB", "InfMB", "-InfKB", "1e15MB", "10000000000000000KB", "100B"} {
+		_, err := NewBandwidthQuantity(bad)
+		require.Error(err, "expected error for %q", bad)
+	}
+
+	var qJSON BandwidthQuantity
+	require.NoError(qJSON.UnmarshalJSON([]byte("null")))
+	require.Error(qJSON.UnmarshalJSON([]byte("12345")))
 }

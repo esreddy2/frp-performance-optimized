@@ -147,3 +147,30 @@ func TestWrapperInWorkConnPhaseSnapshot(t *testing.T) {
 		t.Fatal("phase writer did not finish")
 	}
 }
+
+type failingRunProxy struct {
+	closingWorkProxy
+}
+
+func (f *failingRunProxy) Run() error {
+	return io.ErrUnexpectedEOF
+}
+
+func TestWrapperSetRunningStatusAndHealthTransitions(t *testing.T) {
+	pw := newWrapperForLifecycleTest(t)
+	defer pw.Stop()
+
+	// SetRunningStatus fails when Phase != ProxyPhaseWaitStart
+	require.ErrorContains(t, pw.SetRunningStatus(":6000", ""), "status not wait start")
+
+	// SetRunningStatus with server respErr sets ProxyPhaseStartErr
+	pw.Phase = ProxyPhaseWaitStart
+	require.ErrorContains(t, pw.SetRunningStatus(":6000", "port already used"), "port already used")
+	require.Equal(t, ProxyPhaseStartErr, pw.Phase)
+
+	// SetRunningStatus when pxy.Run() fails sets ProxyPhaseStartErr
+	pw.pxy = &failingRunProxy{}
+	pw.Phase = ProxyPhaseWaitStart
+	require.ErrorIs(t, pw.SetRunningStatus(":6000", ""), io.ErrUnexpectedEOF)
+	require.Equal(t, ProxyPhaseStartErr, pw.Phase)
+}

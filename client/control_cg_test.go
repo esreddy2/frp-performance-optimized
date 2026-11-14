@@ -249,3 +249,80 @@ func TestControlSessionDialerDialV2CryptoNegotiationFailureClosesResourcesCG012(
 		t.Fatal("server did not finish")
 	}
 }
+
+func TestControlHeartbeatWorkerExitsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	common := &v1.ClientCommonConfig{
+		Auth: v1.AuthClientConfig{
+			Method: v1.AuthMethodToken,
+			Token:  "token",
+		},
+		Transport: v1.ClientTransportConfig{
+			HeartbeatInterval: 30,
+			HeartbeatTimeout:  90,
+		},
+	}
+	authRuntime, err := auth.BuildClientAuth(&common.Auth)
+	require.NoError(t, err)
+
+	ctl, err := NewControl(ctx, &SessionContext{
+		Common:    common,
+		RunID:     "hb-cancel-run",
+		Conn:      msg.NewConn(clientConn, msg.NewV1ReadWriter(clientConn)),
+		Auth:      authRuntime,
+		Connector: newMessageConnector(&testConnector{}, ""),
+	})
+	require.NoError(t, err)
+
+	// Start heartbeatWorker without calling worker() or GracefulClose().
+	ctl.heartbeatWorker()
+
+	// Canceling the parent ctx must terminate the heartbeat goroutines.
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		ctl.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("heartbeat goroutines did not exit when parent ctx was cancelled")
+	}
+}
+
+func TestControlGracefulCloseRacesWithWorker(t *testing.T) {
+	for range 20 {
+		clientConn, serverConn := net.Pipe()
+		common := &v1.ClientCommonConfig{
+			Auth: v1.AuthClientConfig{
+				Method: v1.AuthMethodToken,
+				Token:  "token",
+			},
+			Transport: v1.ClientTransportConfig{
+				HeartbeatInterval: 30,
+				HeartbeatTimeout:  90,
+			},
+		}
+		authRuntime, err := auth.BuildClientAuth(&common.Auth)
+		require.NoError(t, err)
+
+		ctl, err := NewControl(context.Background(), &SessionContext{
+			Common:    common,
+			RunID:     "race-worker-close",
+			Conn:      msg.NewConn(clientConn, msg.NewV1ReadWriter(clientConn)),
+			Auth:      authRuntime,
+			Connector: newMessageConnector(&testConnector{}, ""),
+		})
+		require.NoError(t, err)
+
+		go ctl.worker()
+		_ = ctl.GracefulClose(0)
+		_ = serverConn.Close()
+	}
+}

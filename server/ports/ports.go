@@ -104,7 +104,7 @@ func (pm *Manager) Acquire(name string, port int) (realPort int, err error) {
 	// check reserved ports first
 	if port == 0 {
 		if ctx, ok := pm.reservedPorts[name]; ok {
-			if pm.isPortAvailable(ctx.Port) {
+			if _, free := pm.freePorts[ctx.Port]; free && pm.isPortAvailable(ctx.Port) {
 				realPort = ctx.Port
 				pm.markPortAcquiredLocked(name, realPort, portCtx)
 				return

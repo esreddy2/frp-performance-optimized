@@ -22,6 +22,7 @@ import (
 	"net"
 	"reflect"
 	"strconv"
+	"sync"
 	"time"
 
 	liberrors "github.com/fatedier/golib/errors"
@@ -48,10 +49,12 @@ type UDPProxy struct {
 	readCh    chan *msg.UDPPacket
 
 	// include msg.UDPPacket and msg.Ping
-	sendCh   chan msg.Message
-	workConn net.Conn
-	closed   bool
-	closeCh  chan struct{}
+	sendCh     chan msg.Message
+	workConn   net.Conn
+	workConnWg *sync.WaitGroup
+	wg         sync.WaitGroup
+	closed     bool
+	closeCh    chan struct{}
 
 	// QUIC datagram relay (RFC 9221). Non-nil while the server has
 	// confirmed datagram support for this proxy on the current work
@@ -99,13 +102,15 @@ func (pxy *UDPProxy) Run() (err error) {
 // that is currently installed.
 func (pxy *UDPProxy) Close() {
 	pxy.mu.Lock()
-	defer pxy.mu.Unlock()
-
 	if pxy.closed {
+		pxy.mu.Unlock()
 		return
 	}
 	pxy.closed = true
-	pxy.retireWorkConnLocked()
+	_ = pxy.retireWorkConnLocked()
+	pxy.mu.Unlock()
+
+	pxy.wg.Wait()
 }
 
 // retireWorkConnLocked stops the work connection that is currently installed
@@ -114,15 +119,15 @@ func (pxy *UDPProxy) Close() {
 // that belong to it.
 //
 // The caller must hold pxy.mu.
-func (pxy *UDPProxy) retireWorkConnLocked() {
-	if pxy.workConn != nil {
-		_ = pxy.workConn.Close()
-		pxy.workConn = nil
-	}
-	// Unregister from the datagram mux first to prevent send-on-closed-channel race
+func (pxy *UDPProxy) retireWorkConnLocked() *sync.WaitGroup {
+	// Unregister from the datagram mux first to prevent send-on-closed-channel race.
 	if pxy.dgMux != nil {
 		pxy.dgMux.Unregister(pxy.datagramName())
 		pxy.dgMux = nil
+	}
+	if pxy.workConn != nil {
+		_ = pxy.workConn.Close()
+		pxy.workConn = nil
 	}
 	// The channels of the work connection are not closed. The goroutines of
 	// the work connection send on them, and a send on a closed channel
@@ -139,6 +144,9 @@ func (pxy *UDPProxy) retireWorkConnLocked() {
 	}
 	pxy.readCh = nil
 	pxy.sendCh = nil
+	wg := pxy.workConnWg
+	pxy.workConnWg = nil
+	return wg
 }
 
 // readUDPWorkConn reads udp packets from the work connection and forwards
@@ -229,7 +237,7 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 		}
 	}
 
-	remote, _, err := pxy.wrapWorkConn(conn, pxy.encryptionKey)
+	remote, recycleFn, err := pxy.wrapWorkConn(conn, pxy.encryptionKey)
 	if err != nil {
 		xl.Errorf("wrap work connection: %v", err)
 		return
@@ -240,7 +248,10 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 	payloadRW, err := msg.NewUDPPacketReadWriter(workConn, pxy.clientCfg.Transport.WireProtocol, pxy.udpPacketCodec)
 	if err != nil {
 		xl.Errorf("create UDP packet read writer: %v", err)
-		workConn.Close()
+		_ = workConn.Close()
+		if recycleFn != nil {
+			recycleFn()
+		}
 		return
 	}
 
@@ -264,13 +275,24 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 		pxy.mu.Unlock()
 		xl.Warnf("udp proxy is closed, drop the new work connection")
 		_ = workConn.Close()
+		if recycleFn != nil {
+			recycleFn()
+		}
 		return
 	}
 	readCh := make(chan *msg.UDPPacket, 1024)
 	sendCh := make(chan msg.Message, 1024)
 	closeCh := make(chan struct{})
-	pxy.retireWorkConnLocked()
+	n := 4
+	if recycleFn != nil {
+		n = 5
+	}
+	pxy.wg.Add(n)
+	workConnWg := &sync.WaitGroup{}
+	workConnWg.Add(n)
+	oldWg := pxy.retireWorkConnLocked()
 	pxy.workConn = workConn
+	pxy.workConnWg = workConnWg
 	pxy.dgMux = dgMux
 	pxy.readCh = readCh
 	pxy.sendCh = sendCh
@@ -297,6 +319,23 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 	}
 	pxy.mu.Unlock()
 
+	if oldWg != nil {
+		oldWg.Wait()
+	}
+
+	// closeFn is called when one of the goroutines of this work connection
+	// stops. It retires the work connection, but only when it is still the
+	// one installed on the proxy: a replaced work connection was retired
+	// already, and nobody has to close it a second time.
+	closeFn := func() {
+		pxy.mu.Lock()
+		defer pxy.mu.Unlock()
+		if pxy.workConn != workConn {
+			return
+		}
+		_ = pxy.retireWorkConnLocked()
+	}
+
 	// Cancellable context tied to this work connection's lifecycle. The
 	// datagram send path uses it for the limiter WaitN so a stall cannot
 	// block the sole outbound pump forever; canceling it on teardown lets
@@ -309,19 +348,28 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 	// connection. It is therefore canceled when the reader or the sender
 	// of this work connection exits, which is also what happens when the
 	// proxy closes the work connection.
-	ctx, cancel := context.WithCancel(context.Background())
+	baseCtx := pxy.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(baseCtx)
 
+	var rwWg sync.WaitGroup
 	workConnReaderFn := func(rw msg.ReadWriter, readCh chan *msg.UDPPacket) {
+		defer rwWg.Done()
 		defer cancel()
+		defer closeFn()
 		readUDPWorkConn(rw, readCh, xl)
 	}
 	workConnSenderFn := func(rw msg.ReadWriter, sendCh chan msg.Message) {
+		defer rwWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				xl.Infof("sender goroutine for udp work connection closed: %v", r)
 			}
 		}()
 		defer cancel()
+		defer closeFn()
 		var errRet error
 		for {
 			select {
@@ -393,16 +441,36 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 		}
 	}
 
-	go workConnSenderFn(payloadRW, sendCh)
-	go workConnReaderFn(payloadRW, readCh)
+	rwWg.Add(2)
 	go func() {
+		defer pxy.wg.Done()
+		defer workConnWg.Done()
+		workConnSenderFn(payloadRW, sendCh)
+	}()
+	go func() {
+		defer pxy.wg.Done()
+		defer workConnWg.Done()
+		workConnReaderFn(payloadRW, readCh)
+	}()
+	go func() {
+		defer pxy.wg.Done()
+		defer workConnWg.Done()
+		defer closeFn()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		udpHeartbeat(sendCh, closeCh, ticker.C, xl)
 	}()
+	if recycleFn != nil {
+		go func() {
+			defer pxy.wg.Done()
+			defer workConnWg.Done()
+			rwWg.Wait()
+			recycleFn()
+		}()
+	}
 
-	// Call Forwarder with proxy protocol and transparent proxy configuration
-	udp.Forwarder(
+	// Call ForwarderWithDone with proxy protocol, transparent proxy configuration, and work-conn context
+	done := udp.ForwarderWithDone(
 		pxy.localAddr,
 		readCh,
 		sendCh,
@@ -410,6 +478,7 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 		int(pxy.clientCfg.UDPPacketSize),
 		pxy.cfg.Transport.ProxyProtocol,
 		udp.ForwarderOptions{
+			Context:           ctx,
 			ProxyProtocol:     pxy.cfg.Transport.ProxyProtocol,
 			ProxyProtocolMode: pxy.cfg.Transport.ProxyProtocolMode,
 			SocketMark:        pxy.cfg.Transport.SocketMark,
@@ -418,4 +487,9 @@ func (pxy *UDPProxy) InWorkConn(conn net.Conn, startMsg *msg.StartWorkConn) {
 			},
 		},
 	)
+	go func() {
+		defer pxy.wg.Done()
+		defer workConnWg.Done()
+		<-done
+	}()
 }

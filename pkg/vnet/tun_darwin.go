@@ -29,17 +29,23 @@ const (
 )
 
 func openTun(_ context.Context, addr string) (tun.Device, error) {
+	ip, ipNet, err := net.ParseCIDR(addr)
+	if err != nil {
+		return nil, err
+	}
+
 	dev, err := tun.CreateTUN(defaultTunName, defaultMTU)
 	if err != nil {
 		return nil, err
 	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = dev.Close()
+		}
+	}()
 
 	name, err := dev.Name()
-	if err != nil {
-		return nil, err
-	}
-
-	ip, ipNet, err := net.ParseCIDR(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +63,7 @@ func openTun(_ context.Context, addr string) (tun.Device, error) {
 	if err = addRoutes(name, routes); err != nil {
 		return nil, err
 	}
+	cleanup = false
 	return dev, nil
 }
 

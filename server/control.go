@@ -930,6 +930,7 @@ func (ctl *Control) worker() {
 	}
 	ctl.lifecycleMu.Unlock()
 	_ = ctl.interruptReadAndClose()
+	ctl.msgDispatcher.WaitAsync()
 
 	ctl.workConnSendMu.Lock()
 	if !ctl.workConnChClosed {
@@ -971,9 +972,9 @@ func (ctl *Control) worker() {
 func (ctl *Control) registerMsgHandlers() {
 	ctl.msgDispatcher.RegisterHandler(&msg.NewProxy{}, ctl.handleNewProxy)
 	ctl.msgDispatcher.RegisterHandler(&msg.Ping{}, ctl.handlePing)
-	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleVisitor{}, msg.AsyncHandler(ctl.handleNatHoleVisitor))
-	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleClient{}, msg.AsyncHandler(ctl.handleNatHoleClient))
-	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleReport{}, msg.AsyncHandler(ctl.handleNatHoleReport))
+	ctl.msgDispatcher.RegisterAsyncHandler(&msg.NatHoleVisitor{}, ctl.handleNatHoleVisitor)
+	ctl.msgDispatcher.RegisterAsyncHandler(&msg.NatHoleClient{}, ctl.handleNatHoleClient)
+	ctl.msgDispatcher.RegisterAsyncHandler(&msg.NatHoleReport{}, ctl.handleNatHoleReport)
 	ctl.msgDispatcher.RegisterHandler(&msg.CloseProxy{}, ctl.handleCloseProxy)
 }
 
@@ -1217,53 +1218,44 @@ func (ctl *Control) RegisterProxy(
 		return remoteAddr, err
 	}
 
-	// Check ports used number in each client
-	usedPorts := 0
-	if ctl.sessionCtx.ServerCfg.MaxPortsPerClient > 0 {
-		usedPorts = pxy.GetUsedPortsNum()
-		ctl.mu.Lock()
-		if ctl.portsUsedNum+usedPorts > int(ctl.sessionCtx.ServerCfg.MaxPortsPerClient) {
-			ctl.mu.Unlock()
-			err = fmt.Errorf("exceed the max_ports_per_client")
-			return
-		}
-		ctl.portsUsedNum += usedPorts
-		ctl.mu.Unlock()
-
-		defer func() {
-			if err != nil {
-				ctl.mu.Lock()
-				ctl.portsUsedNum -= usedPorts
-				ctl.mu.Unlock()
-			}
-		}()
-	}
-
-	if ctl.sessionCtx.PxyManager.Exist(pxyMsg.ProxyName) {
-		err = fmt.Errorf("proxy [%s] already exists", pxyMsg.ProxyName)
-		return
-	}
-
 	defer func() {
 		if err != nil {
 			pxy.Close()
 		}
 	}()
 
-	// Add to the proxy manager before running so a successfully started proxy
-	// is never untracked. On Run failure, remove the stale entry.
+	// Check ports used number and add to the proxy manager atomically under
+	// ctl.mu before running so a successfully started proxy is never untracked
+	// and port accounting cannot drift on duplicate/concurrent registrations.
+	usedPorts := 0
+	maxPorts := int(ctl.sessionCtx.ServerCfg.MaxPortsPerClient)
+	if maxPorts > 0 {
+		usedPorts = pxy.GetUsedPortsNum()
+	}
+
 	ctl.mu.Lock()
-	addErr := ctl.sessionCtx.PxyManager.Add(pxyMsg.ProxyName, pxy)
-	ctl.mu.Unlock()
-	if addErr != nil {
+	if maxPorts > 0 && ctl.portsUsedNum+usedPorts > maxPorts {
+		ctl.mu.Unlock()
+		err = fmt.Errorf("exceed the max_ports_per_client")
+		return
+	}
+	if addErr := ctl.sessionCtx.PxyManager.Add(pxyMsg.ProxyName, pxy); addErr != nil {
+		ctl.mu.Unlock()
 		err = addErr
 		return
 	}
+	if maxPorts > 0 {
+		ctl.portsUsedNum += usedPorts
+	}
+	ctl.mu.Unlock()
 
 	remoteAddr, err = pxy.Run()
 	if err != nil {
 		ctl.mu.Lock()
 		ctl.sessionCtx.PxyManager.Del(pxyMsg.ProxyName)
+		if maxPorts > 0 {
+			ctl.portsUsedNum -= usedPorts
+		}
 		ctl.mu.Unlock()
 		return
 	}

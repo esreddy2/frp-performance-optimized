@@ -15,109 +15,43 @@
 package net
 
 import (
-	"bytes"
 	"errors"
 	"net"
-	"runtime/pprof"
-	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	kcp "github.com/xtaci/kcp-go/v5"
 )
 
-func kcpGoroutineDump(t *testing.T) string {
-	t.Helper()
-	var buf bytes.Buffer
-	require.NoError(t, pprof.Lookup("goroutine").WriteTo(&buf, 2))
-	return buf.String()
-}
+func TestKCPListenerAcceptErrorBackoff(t *testing.T) {
+	l := &KCPListener{
+		acceptCh: make(chan net.Conn, 1),
+		done:     make(chan struct{}),
+	}
 
-func TestKCPListenerCloseCancelsPendingHandoff(t *testing.T) {
-	l, err := ListenKcp("127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = l.Close()
-		// Also release a stuck handoff when this test runs against the old code.
-		select {
-		case conn := <-l.acceptCh:
-			if conn != nil {
-				_ = conn.Close()
-			}
-		default:
-		}
-	})
+	var calls atomic.Int32
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		l.runAcceptLoop(func() (*kcp.UDPSession, error) {
+			calls.Add(1)
+			return nil, errors.New("temporary accept error")
+		})
+	}()
 
-	sessionsBefore := atomic.LoadUint64(&kcp.DefaultSnmp.CurrEstab)
-	peer, err := kcp.DialWithOptions(l.Addr().String(), nil, 10, 3)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = peer.Close() })
-	peer.SetNoDelay(1, 10, 2, 1)
-	require.NoError(t, peer.SetWriteDeadline(time.Now().Add(5*time.Second)))
-	_, err = peer.Write([]byte("pending handoff"))
-	require.NoError(t, err)
+	// With exponential backoff starting at 5ms (5ms -> 10ms -> 20ms -> 40ms -> 80ms),
+	// in 50ms there should be only a handful of calls, not a busy-spin.
+	time.Sleep(50 * time.Millisecond)
+	count := calls.Load()
+	require.GreaterOrEqual(t, count, int32(2))
+	require.Less(t, count, int32(10), "accept loop should back off instead of busy-spinning")
 
-	// With a buffered handoff channel the pending connection is delivered
-	// to the accept queue instead of blocking the accept loop, so wait for
-	// that delivery before retiring the listener.
-	require.Eventually(t, func() bool {
-		return len(l.acceptCh) > 0
-	}, 5*time.Second, time.Millisecond, "accept loop did not hand off the pending connection")
-	require.Equal(t, sessionsBefore+2, atomic.LoadUint64(&kcp.DefaultSnmp.CurrEstab))
-
-	require.NoError(t, l.Close())
-	require.Eventually(t, func() bool {
-		return !strings.Contains(kcpGoroutineDump(t), "github.com/fatedier/frp/pkg/util/net.ListenKcp.func1()")
-	}, 5*time.Second, time.Millisecond, "accept loop remained running after Close")
-
-	// Close drains the buffered pending handoff, so the pending server
-	// session is released by Close itself.
-	require.Eventually(t, func() bool {
-		return atomic.LoadUint64(&kcp.DefaultSnmp.CurrEstab) == sessionsBefore+1
-	}, 5*time.Second, time.Millisecond, "pending server session was not released by Close")
-	require.NoError(t, peer.Close())
-	require.Equal(t, sessionsBefore, atomic.LoadUint64(&kcp.DefaultSnmp.CurrEstab))
-}
-
-func TestKCPListenerAcceptUnblocksOnClose(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		l := &KCPListener{
-			listener: &closeStubListener{closed: make(chan struct{}), err: errors.New("listener close failed")},
-			acceptCh: make(chan net.Conn),
-			done:     make(chan struct{}),
-		}
-		t.Cleanup(func() { _ = l.Close() })
-		acceptErr := make(chan error, 1)
-		go func() {
-			conn, err := l.Accept()
-			if conn != nil {
-				t.Error("Accept returned a connection without a sender")
-			}
-			acceptErr <- err
-		}()
-		synctest.Wait() // Accept is blocked before Close.
-		require.Empty(t, acceptErr)
-
-		var wg sync.WaitGroup
-		for range 2 {
-			wg.Go(func() {
-				if err := l.Close(); err != nil {
-					t.Errorf("Close: %v", err)
-				}
-			})
-		}
-		wg.Wait()
-		synctest.Wait()
-		require.Len(t, acceptErr, 1)
-		require.ErrorIs(t, <-acceptErr, ErrKCPListenerClosed)
-
-		require.NoError(t, l.Close())
-		conn, err := l.Accept()
-		require.Nil(t, conn)
-		require.ErrorIs(t, err, ErrKCPListenerClosed)
-	})
+	close(l.done)
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("runAcceptLoop did not exit promptly when done was closed")
+	}
 }

@@ -689,3 +689,160 @@ func TestGetVisitorConfigNotFound(t *testing.T) {
 	}
 	assertHTTPCode(t, err, http.StatusNotFound)
 }
+
+func TestControllerStatusConfigStopAndStoreCRUD(t *testing.T) {
+	closedCh := make(chan time.Duration, 1)
+	var writtenCfg []byte
+
+	mgr := &fakeConfigManager{
+		gracefulCloseFn: func(d time.Duration) {
+			select {
+			case closedCh <- d:
+			default:
+			}
+		},
+		readConfigFileFn: func() (string, error) {
+			return "serverPort = 7000", nil
+		},
+		writeConfigFileFn: func(content []byte) error {
+			writtenCfg = content
+			return nil
+		},
+		getProxyStatusFn: func() []*proxy.WorkingStatus {
+			return []*proxy.WorkingStatus{
+				{Name: "b-tcp", Type: "tcp", Phase: proxy.ProxyPhaseRunning, RemoteAddr: ":6002", Cfg: newRawTCPProxyConfig("b-tcp")},
+				{Name: "a-tcp", Type: "tcp", Phase: proxy.ProxyPhaseRunning, RemoteAddr: ":6001", Cfg: newRawTCPProxyConfig("a-tcp")},
+			}
+		},
+		listStoreProxiesFn: func() ([]v1.ProxyConfigurer, error) {
+			return []v1.ProxyConfigurer{
+				newRawTCPProxyConfig("p-b"),
+				newRawTCPProxyConfig("p-a"),
+			}, nil
+		},
+		getStoreProxyFn: func(name string) (v1.ProxyConfigurer, error) {
+			if name == "p-a" {
+				return newRawTCPProxyConfig("p-a"), nil
+			}
+			return nil, configmgmt.ErrNotFound
+		},
+		deleteStoreProxyFn: func(name string) error {
+			if name == "p-a" {
+				return nil
+			}
+			return configmgmt.ErrNotFound
+		},
+		listStoreVisitorsFn: func() ([]v1.VisitorConfigurer, error) {
+			return []v1.VisitorConfigurer{
+				&v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "v-b", Type: "stcp"}},
+				&v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "v-a", Type: "stcp"}},
+			}, nil
+		},
+		getStoreVisitorFn: func(name string) (v1.VisitorConfigurer, error) {
+			if name == "v-a" {
+				return &v1.STCPVisitorConfig{VisitorBaseConfig: v1.VisitorBaseConfig{Name: "v-a", Type: "stcp"}}, nil
+			}
+			return nil, configmgmt.ErrNotFound
+		},
+		updateStoreVisitFn: func(name string, cfg v1.VisitorConfigurer) (v1.VisitorConfigurer, error) {
+			return cfg, nil
+		},
+		deleteStoreVisitFn: func(name string) error {
+			if name == "v-a" {
+				return nil
+			}
+			return configmgmt.ErrNotFound
+		},
+	}
+
+	ctrl := NewController(ControllerParams{
+		ServerAddr: "10.0.0.1",
+		Manager:    mgr,
+	})
+
+	// 1. Status sorts proxies by name within each type
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	statusResp, err := ctrl.Status(httppkg.NewContext(httptest.NewRecorder(), statusReq))
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	sr := statusResp.(model.StatusResp)
+	if len(sr["tcp"]) != 2 || sr["tcp"][0].Name != "a-tcp" || sr["tcp"][1].Name != "b-tcp" {
+		t.Fatalf("expected sorted tcp status, got: %+v", sr["tcp"])
+	}
+
+	// 2. GetConfig and PutConfig (valid + empty body error)
+	cfgResp, err := ctrl.GetConfig(httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/config", nil)))
+	if err != nil || cfgResp.(string) != "serverPort = 7000" {
+		t.Fatalf("GetConfig unexpected: %v, %v", cfgResp, err)
+	}
+
+	_, err = ctrl.PutConfig(httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodPut, "/api/config", nil)))
+	assertHTTPCode(t, err, http.StatusBadRequest)
+
+	_, err = ctrl.PutConfig(httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString("new-cfg"))))
+	if err != nil || string(writtenCfg) != "new-cfg" {
+		t.Fatalf("PutConfig failed: %v", err)
+	}
+
+	// 3. Stop triggers GracefulClose
+	_, err = ctrl.Stop(httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/stop", nil)))
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	select {
+	case <-closedCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for GracefulClose")
+	}
+
+	// 4. ListStoreProxies, GetStoreProxy, DeleteStoreProxy
+	listProxiesResp, err := ctrl.ListStoreProxies(httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/store/proxies", nil)))
+	if err != nil {
+		t.Fatalf("ListStoreProxies failed: %v", err)
+	}
+	plist := listProxiesResp.(model.ProxyListResp)
+	if len(plist.Proxies) != 2 || plist.Proxies[0].Name != "p-a" {
+		t.Fatalf("unexpected proxy list: %+v", plist)
+	}
+
+	getProxyReq := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/store/proxies/p-a", nil), map[string]string{"name": "p-a"})
+	if _, err := ctrl.GetStoreProxy(httppkg.NewContext(httptest.NewRecorder(), getProxyReq)); err != nil {
+		t.Fatalf("GetStoreProxy failed: %v", err)
+	}
+
+	delProxyReq := mux.SetURLVars(httptest.NewRequest(http.MethodDelete, "/api/store/proxies/p-a", nil), map[string]string{"name": "p-a"})
+	if _, err := ctrl.DeleteStoreProxy(httppkg.NewContext(httptest.NewRecorder(), delProxyReq)); err != nil {
+		t.Fatalf("DeleteStoreProxy failed: %v", err)
+	}
+
+	// 5. ListStoreVisitors, GetStoreVisitor, UpdateStoreVisitor, DeleteStoreVisitor
+	listVisResp, err := ctrl.ListStoreVisitors(httppkg.NewContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/store/visitors", nil)))
+	if err != nil {
+		t.Fatalf("ListStoreVisitors failed: %v", err)
+	}
+	vlist := listVisResp.(model.VisitorListResp)
+	if len(vlist.Visitors) != 2 || vlist.Visitors[0].Name != "v-a" {
+		t.Fatalf("unexpected visitor list: %+v", vlist)
+	}
+
+	getVisReq := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/api/store/visitors/v-a", nil), map[string]string{"name": "v-a"})
+	if _, err := ctrl.GetStoreVisitor(httppkg.NewContext(httptest.NewRecorder(), getVisReq)); err != nil {
+		t.Fatalf("GetStoreVisitor failed: %v", err)
+	}
+
+	visBody, _ := json.Marshal(map[string]any{
+		"name": "v-a",
+		"type": "stcp",
+		"stcp": map[string]any{"serverName": "srv", "bindPort": 6000},
+	})
+	updVisReq := mux.SetURLVars(httptest.NewRequest(http.MethodPut, "/api/store/visitors/v-a", bytes.NewReader(visBody)), map[string]string{"name": "v-a"})
+	if _, err := ctrl.UpdateStoreVisitor(httppkg.NewContext(httptest.NewRecorder(), updVisReq)); err != nil {
+		t.Fatalf("UpdateStoreVisitor failed: %v", err)
+	}
+
+	delVisReq := mux.SetURLVars(httptest.NewRequest(http.MethodDelete, "/api/store/visitors/v-a", nil), map[string]string{"name": "v-a"})
+	if _, err := ctrl.DeleteStoreVisitor(httppkg.NewContext(httptest.NewRecorder(), delVisReq)); err != nil {
+		t.Fatalf("DeleteStoreVisitor failed: %v", err)
+	}
+}

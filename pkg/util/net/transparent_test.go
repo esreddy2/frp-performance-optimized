@@ -17,7 +17,7 @@ func TestDialTransparentNilDestination(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "destination address cannot be nil")
 
-	_, err = DialUDPTransparent(nil, nil, 0)
+	_, err = DialUDPTransparent(context.Background(), nil, nil, 0)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "destination address cannot be nil")
 }
@@ -46,7 +46,7 @@ func TestDialUDPTransparentPermissionOrSupport(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		local := &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1234}
 		dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 80}
-		_, err := DialUDPTransparent(local, dst, 0)
+		_, err := DialUDPTransparent(context.Background(), local, dst, 0)
 		require.ErrorIs(t, err, ErrTransparentNotSupported)
 		return
 	}
@@ -54,11 +54,24 @@ func TestDialUDPTransparentPermissionOrSupport(t *testing.T) {
 	localAddr := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 54321}
 	dstAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 59999}
 
-	_, err := DialUDPTransparent(localAddr, dstAddr, 0)
+	_, err := DialUDPTransparent(context.Background(), localAddr, dstAddr, 0)
 	require.Error(t, err)
 	if errors.Is(err, syscall.EPERM) {
 		require.Contains(t, err.Error(), "CAP_NET_ADMIN")
 	}
+}
+
+func TestDialUDPTransparentCanceledContext(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-only")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	dstAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 59999}
+	_, err := DialUDPTransparent(ctx, nil, dstAddr, 0)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestCheckTransparentSupport(t *testing.T) {
@@ -72,4 +85,28 @@ func TestCheckTransparentSupport(t *testing.T) {
 		require.Contains(t, err.Error(), "CAP_NET_ADMIN")
 	}
 	_ = warnings
+}
+
+func TestCheckTransparentSupportIPv6(t *testing.T) {
+	warnings, err := CheckTransparentSupport("::1")
+	if runtime.GOOS != "linux" {
+		require.ErrorIs(t, err, ErrTransparentNotSupported)
+		return
+	}
+	if err != nil {
+		require.Contains(t, err.Error(), "IPv6")
+	}
+	_ = warnings
+}
+
+func TestDialTCPTransparentIPv6NilLocalAddr(t *testing.T) {
+	dstAddr := &net.TCPAddr{IP: net.IPv6loopback, Port: 59999}
+	_, err := DialTCPTransparent(context.Background(), nil, dstAddr, time.Second, 0)
+	if runtime.GOOS != "linux" {
+		require.ErrorIs(t, err, ErrTransparentNotSupported)
+		return
+	}
+	if err != nil && errors.Is(err, syscall.EPERM) {
+		require.Contains(t, err.Error(), "IPV6_TRANSPARENT")
+	}
 }

@@ -194,6 +194,9 @@ func (auth *OidcAuthProvider) generateAccessToken() (accessToken string, err err
 }
 
 func (auth *OidcAuthProvider) SetLogin(loginMsg *msg.Login) (err error) {
+	if loginMsg == nil {
+		return fmt.Errorf("login message is nil")
+	}
 	loginMsg.PrivilegeKey, err = auth.generateAccessToken()
 	return err
 }
@@ -201,6 +204,9 @@ func (auth *OidcAuthProvider) SetLogin(loginMsg *msg.Login) (err error) {
 func (auth *OidcAuthProvider) SetPing(pingMsg *msg.Ping) (err error) {
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeHeartBeats) {
 		return nil
+	}
+	if pingMsg == nil {
+		return fmt.Errorf("ping message is nil")
 	}
 
 	pingMsg.PrivilegeKey, err = auth.generateAccessToken()
@@ -210,6 +216,9 @@ func (auth *OidcAuthProvider) SetPing(pingMsg *msg.Ping) (err error) {
 func (auth *OidcAuthProvider) SetNewWorkConn(newWorkConnMsg *msg.NewWorkConn) (err error) {
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeNewWorkConns) {
 		return nil
+	}
+	if newWorkConnMsg == nil {
+		return fmt.Errorf("newWorkConn message is nil")
 	}
 
 	newWorkConnMsg.PrivilegeKey, err = auth.generateAccessToken()
@@ -230,6 +239,9 @@ func NewOidcTokenSourceAuthSetter(additionalAuthScopes []v1.AuthScope, valueSour
 }
 
 func (auth *OidcTokenSourceAuthProvider) generateAccessToken() (accessToken string, err error) {
+	if auth.valueSource == nil {
+		return "", fmt.Errorf("couldn't acquire OIDC token for login: token source is nil")
+	}
 	ctx := context.Background()
 	accessToken, err = auth.valueSource.Resolve(ctx)
 	if err != nil {
@@ -239,6 +251,9 @@ func (auth *OidcTokenSourceAuthProvider) generateAccessToken() (accessToken stri
 }
 
 func (auth *OidcTokenSourceAuthProvider) SetLogin(loginMsg *msg.Login) (err error) {
+	if loginMsg == nil {
+		return fmt.Errorf("login message is nil")
+	}
 	loginMsg.PrivilegeKey, err = auth.generateAccessToken()
 	return err
 }
@@ -246,6 +261,9 @@ func (auth *OidcTokenSourceAuthProvider) SetLogin(loginMsg *msg.Login) (err erro
 func (auth *OidcTokenSourceAuthProvider) SetPing(pingMsg *msg.Ping) (err error) {
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeHeartBeats) {
 		return nil
+	}
+	if pingMsg == nil {
+		return fmt.Errorf("ping message is nil")
 	}
 
 	pingMsg.PrivilegeKey, err = auth.generateAccessToken()
@@ -255,6 +273,9 @@ func (auth *OidcTokenSourceAuthProvider) SetPing(pingMsg *msg.Ping) (err error) 
 func (auth *OidcTokenSourceAuthProvider) SetNewWorkConn(newWorkConnMsg *msg.NewWorkConn) (err error) {
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeNewWorkConns) {
 		return nil
+	}
+	if newWorkConnMsg == nil {
+		return fmt.Errorf("newWorkConn message is nil")
 	}
 
 	newWorkConnMsg.PrivilegeKey, err = auth.generateAccessToken()
@@ -296,9 +317,18 @@ func NewOidcAuthVerifier(additionalAuthScopes []v1.AuthScope, verifier TokenVeri
 }
 
 func (auth *OidcAuthConsumer) VerifyLogin(loginMsg *msg.Login) (err error) {
+	if loginMsg == nil {
+		return fmt.Errorf("login message is nil")
+	}
+	if auth.verifier == nil {
+		return fmt.Errorf("OIDC token verifier is nil")
+	}
 	token, err := auth.verifier.Verify(context.Background(), loginMsg.PrivilegeKey)
 	if err != nil {
 		return fmt.Errorf("invalid OIDC token in login: %v", err)
+	}
+	if token == nil {
+		return fmt.Errorf("invalid OIDC token in login: token is nil")
 	}
 	auth.mu.Lock()
 	auth.subjectsFromLogin[token.Subject] = struct{}{}
@@ -307,9 +337,15 @@ func (auth *OidcAuthConsumer) VerifyLogin(loginMsg *msg.Login) (err error) {
 }
 
 func (auth *OidcAuthConsumer) verifyPostLoginToken(privilegeKey string) (err error) {
+	if auth.verifier == nil {
+		return fmt.Errorf("OIDC token verifier is nil")
+	}
 	token, err := auth.verifier.Verify(context.Background(), privilegeKey)
 	if err != nil {
 		return fmt.Errorf("invalid OIDC token in ping: %v", err)
+	}
+	if token == nil {
+		return fmt.Errorf("invalid OIDC token in ping: token is nil")
 	}
 	auth.mu.RLock()
 	_, ok := auth.subjectsFromLogin[token.Subject]
@@ -326,6 +362,9 @@ func (auth *OidcAuthConsumer) VerifyPing(pingMsg *msg.Ping) (err error) {
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeHeartBeats) {
 		return nil
 	}
+	if pingMsg == nil {
+		return fmt.Errorf("ping message is nil")
+	}
 
 	return auth.verifyPostLoginToken(pingMsg.PrivilegeKey)
 }
@@ -333,6 +372,9 @@ func (auth *OidcAuthConsumer) VerifyPing(pingMsg *msg.Ping) (err error) {
 func (auth *OidcAuthConsumer) VerifyNewWorkConn(newWorkConnMsg *msg.NewWorkConn) (err error) {
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeNewWorkConns) {
 		return nil
+	}
+	if newWorkConnMsg == nil {
+		return fmt.Errorf("newWorkConn message is nil")
 	}
 
 	return auth.verifyPostLoginToken(newWorkConnMsg.PrivilegeKey)

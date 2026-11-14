@@ -92,23 +92,21 @@ func (vm *Manager) keepVisitorsRunning() {
 			xl.Tracef("gracefully shutdown visitor manager")
 			return
 		case <-ticker.C:
-			// Collect names of visitors that need to be started under RLock,
-			// then start them outside the lock to avoid blocking TransferConn/GetVisitorCfg/UpdateAll.
-			vm.mu.RLock()
-			var toStart []v1.VisitorConfigurer
+			vm.mu.Lock()
+			select {
+			case <-vm.stopCh:
+				vm.mu.Unlock()
+				return
+			default:
+			}
 			for _, cfg := range vm.cfgs {
 				name := cfg.GetBaseConfig().Name
 				if _, exist := vm.visitors[name]; !exist {
-					toStart = append(toStart, cfg)
+					xl.Infof("try to start visitor [%s]", name)
+					_ = vm.startVisitor(cfg)
 				}
 			}
-			vm.mu.RUnlock()
-
-			for _, cfg := range toStart {
-				name := cfg.GetBaseConfig().Name
-				xl.Infof("try to start visitor [%s]", name)
-				_ = vm.startVisitor(cfg)
-			}
+			vm.mu.Unlock()
 		}
 	}
 }

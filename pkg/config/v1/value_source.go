@@ -15,12 +15,21 @@
 package v1
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
+)
+
+const (
+	defaultExecTimeout = 30 * time.Second
+	execWaitDelay      = 5 * time.Second
+	maxExecOutputBytes = 1 << 20 // 1 MiB
+	maxExecStderrBytes = 4096
 )
 
 // ValueSource provides a way to dynamically resolve configuration values
@@ -119,8 +128,16 @@ func (e *ExecSource) Validate() error {
 		return errors.New("execSource cannot be nil")
 	}
 
-	if e.Command == "" {
+	if strings.TrimSpace(e.Command) == "" {
 		return errors.New("exec command cannot be empty")
+	}
+	if strings.ContainsRune(e.Command, 0) {
+		return errors.New("exec command cannot contain NUL byte")
+	}
+	for _, arg := range e.Args {
+		if strings.ContainsRune(arg, 0) {
+			return errors.New("exec arg cannot contain NUL byte")
+		}
 	}
 
 	for _, env := range e.Env {
@@ -130,8 +147,38 @@ func (e *ExecSource) Validate() error {
 		if strings.Contains(env.Name, "=") {
 			return errors.New("exec env name cannot contain '='")
 		}
+		if strings.ContainsRune(env.Name, 0) || strings.ContainsRune(env.Value, 0) {
+			return errors.New("exec env cannot contain NUL byte")
+		}
 	}
 	return nil
+}
+
+type limitedOutputBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	failOnCap bool
+	exceeded  bool
+}
+
+func (w *limitedOutputBuffer) Write(p []byte) (int, error) {
+	remaining := w.limit - w.buf.Len()
+	if remaining <= 0 {
+		w.exceeded = true
+		if w.failOnCap {
+			return 0, fmt.Errorf("exec output exceeds %d bytes", w.limit)
+		}
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		_, _ = w.buf.Write(p[:remaining])
+		w.exceeded = true
+		if w.failOnCap {
+			return remaining, fmt.Errorf("exec output exceeds %d bytes", w.limit)
+		}
+		return len(p), nil
+	}
+	return w.buf.Write(p)
 }
 
 // Resolve reads and returns the content captured from stdout of launched subprocess.
@@ -140,7 +187,17 @@ func (e *ExecSource) Resolve(ctx context.Context) (string, error) {
 		return "", err
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultExecTimeout)
+		defer cancel()
+	}
+
 	cmd := exec.CommandContext(ctx, e.Command, e.Args...)
+	cmd.WaitDelay = execWaitDelay
 	if len(e.Env) != 0 {
 		cmd.Env = os.Environ()
 		for _, env := range e.Env {
@@ -148,11 +205,21 @@ func (e *ExecSource) Resolve(ctx context.Context) (string, error) {
 		}
 	}
 
-	content, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to execute command %v: %v", e.Command, err)
+	stdout := &limitedOutputBuffer{limit: maxExecOutputBytes, failOnCap: true}
+	stderr := &limitedOutputBuffer{limit: maxExecStderrBytes, failOnCap: false}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	if err := cmd.Run(); err != nil {
+		if stdout.exceeded {
+			return "", fmt.Errorf("failed to execute command %v: output exceeded %d bytes", e.Command, maxExecOutputBytes)
+		}
+		if stderrMsg := strings.TrimSpace(stderr.buf.String()); stderrMsg != "" {
+			return "", fmt.Errorf("failed to execute command %v: %w (%s)", e.Command, err, stderrMsg)
+		}
+		return "", fmt.Errorf("failed to execute command %v: %w", e.Command, err)
 	}
 
 	// Trim whitespace, which is important for exec-based tokens
-	return strings.TrimSpace(string(content)), nil
+	return strings.TrimSpace(stdout.buf.String()), nil
 }

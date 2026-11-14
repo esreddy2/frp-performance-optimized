@@ -15,14 +15,20 @@ Both **TCP** and **UDP** proxies are supported.
 1. **Client to Server:** The remote client connects to `frps`, which negotiates the proxy connection.
 2. **Control & Data Forwarding:** `frps` forwards the client connection and metadata (including the client's public IP and port) to `frpc`.
 3. **Transparent Local Dial:** When `transport.proxyProtocol = "tproxy"` is configured:
-   - `frpc` creates a local socket with the `IP_TRANSPARENT` (`SO_MARK` / `SOL_IP`) socket option.
+   - `frpc` creates a local socket with the `IP_TRANSPARENT` (`SOL_IP` for IPv4, `SOL_IPV6` for IPv6) socket option.
    - It binds the local socket to the original client's source IP and port before connecting to the backend service.
-   - It marks outgoing packets with `SO_MARK` (by default `0x01` / `1`).
+   - It marks outgoing packets separately with `SO_MARK` (`SOL_SOCKET`, by default `0x01` / `1`).
 4. **Backend Reception:** The backend service accepts the connection and inspects `RemoteAddr`, observing the genuine client's IP and port.
 5. **Return Traffic Routing:** When the backend replies, its packets are addressed to the client IP. Linux policy routing (`ip rule` and `ip route`) ensures response packets are routed back to loopback so `frpc` can read and return them through the tunnel.
 
 ### Source Port Collision Handling
 If a local connection is already using the exact same `(ClientIP, ClientPort)` tuple, the Linux kernel rejects binding with `EADDRINUSE`. The client detects this condition and automatically falls back to binding to `(ClientIP, 0)`—allowing the kernel to assign an ephemeral source port while still preserving the authentic client IP address.
+
+### Caveats & Limitations
+- **Linux-only:** Transparent proxying (`tproxy`) is only supported on Linux (`ErrTransparentNotSupported` on other platforms).
+- **Client plugins:** `tproxy` is incompatible with client-side plugins (`plugin.type`); when a plugin is configured, the plugin handles the connection directly without transparent dialing.
+- **Configuration aliases & Web UI:** `transport.proxyProtocol` is the primary field (`transport.proxyProtocolVersion` is mapped as a legacy alias and used in older UI bindings; the Web UI maps both to the Proxy Protocol selector).
+- **IPv6:** IPv6 transparent proxying uses `IPV6_TRANSPARENT` (`SOL_IPV6`), requires `net.ipv6.conf.all.forwarding=1` for cross-interface routing, and requires `ip -6 rule` / `ip -6 route` entries for return traffic.
 
 ---
 
@@ -100,7 +106,7 @@ To persist policy routing across reboots, add them to your network manager confi
 Setting `IP_TRANSPARENT` and `SO_MARK` requires the `CAP_NET_ADMIN` capability. You can run `frpc` as a non-root user by granting file capabilities:
 
 ```bash
-sudo setcap cap_net_admin,cap_net_raw+ep /usr/local/bin/frpc
+sudo setcap cap_net_admin+ep /usr/local/bin/frpc
 ```
 
 ### Systemd Service Example (Non-Root)
@@ -118,8 +124,8 @@ ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
@@ -133,7 +139,7 @@ Pre-flight checks provide actionable diagnostic error messages when TPROXY canno
 
 | Error / Symptom | Probable Cause | Action |
 | :--- | :--- | :--- |
-| `operation not permitted` (`EPERM`) | Missing `CAP_NET_ADMIN` capability | Grant capabilities: `sudo setcap cap_net_admin,cap_net_raw+ep $(which frpc)` or run with adequate permissions. |
+| `operation not permitted` (`EPERM`) | Missing `CAP_NET_ADMIN` capability | Grant capabilities: `sudo setcap cap_net_admin+ep $(which frpc)` or run with adequate permissions. |
 | `cannot assign requested address` (`EADDRNOTAVAIL`) | `IP_TRANSPARENT` not active or disabled by kernel | Verify kernel supports `IP_TRANSPARENT` (standard in Linux 2.6.28+). Check `sysctl net.ipv4.ip_forward=1`. |
 | Connection times out / SYN-ACK not received | Response routing loop or missing local table route | Ensure policy route exists: `ip rule show` and `ip route show table 100`. Verify `sysctl net.ipv4.conf.all.route_localnet=1`. |
 | Proxy validation error on startup | Mutually exclusive proxy options configured | `transport.proxyProtocol = "tproxy"` cannot be combined with `transport.proxyProtocolMode` (which is only for PROXY protocol headers). |

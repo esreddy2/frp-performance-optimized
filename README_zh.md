@@ -121,7 +121,7 @@ transport.socketMark = 1 # Linux fwmark 策略路由标记，默认值为 1
 **Linux 主机网络配置：**
 ```bash
 # 赋予 frpc 网络管理能力（非 root 运行支持）
-sudo setcap cap_net_admin,cap_net_raw+ep $(which frpc)
+sudo setcap cap_net_admin+ep $(which frpc)
 
 # 开启内核转发与本地路由
 sudo sysctl -w net.ipv4.ip_forward=1

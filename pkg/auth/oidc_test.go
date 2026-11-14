@@ -3,9 +3,12 @@ package auth_test
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -306,4 +309,271 @@ func TestPingWithTheSubjectOfAnotherSessionIsAccepted(t *testing.T) {
 		Timestamp:    time.Now().UnixMilli(),
 	}))
 	r.Error(consumer.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "token-mallory"}))
+}
+
+func TestOidcAuthProviderScopesAndCustomHTTPClient(t *testing.T) {
+	r := require.New(t)
+
+	var receivedAudience, receivedCustomParam string
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_ = req.ParseForm()
+		receivedAudience = req.FormValue("audience")
+		receivedCustomParam = req.FormValue("resource")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:gosec
+			"access_token": "tls-oidc-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tlsServer.Close()
+
+	// Write server's self-signed cert to a CA PEM file
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsServer.Certificate().Raw})
+	r.NoError(os.WriteFile(caFile, certPEM, 0o600))
+
+	// 1. With TrustedCaFile + Audience + AdditionalEndpointParams + NewWorkConns scope only
+	provider, err := auth.NewOidcAuthSetter(
+		[]v1.AuthScope{v1.AuthScopeNewWorkConns},
+		v1.AuthOIDCClientConfig{
+			ClientID:                 "client-1",
+			ClientSecret:             "secret-1",
+			Audience:                 "frps-aud",
+			Scope:                    "openid",
+			TokenEndpointURL:         tlsServer.URL,
+			TrustedCaFile:            caFile,
+			AdditionalEndpointParams: map[string]string{"resource": "urn:frp"},
+		},
+	)
+	r.NoError(err)
+
+	// SetPing should be a no-op since AuthScopeHeartBeats is not enabled
+	pingMsg := &msg.Ping{}
+	r.NoError(provider.SetPing(pingMsg))
+	r.Empty(pingMsg.PrivilegeKey)
+
+	// SetNewWorkConn should fetch token since AuthScopeNewWorkConns is enabled
+	workMsg := &msg.NewWorkConn{}
+	r.NoError(provider.SetNewWorkConn(workMsg))
+	r.Equal("tls-oidc-token", workMsg.PrivilegeKey)
+	r.Equal("frps-aud", receivedAudience)
+	r.Equal("urn:frp", receivedCustomParam)
+
+	// 2. With InsecureSkipVerify and ProxyURL
+	providerInsecure, err := auth.NewOidcAuthSetter(
+		nil,
+		v1.AuthOIDCClientConfig{
+			ClientID:           "client-1",
+			ClientSecret:       "secret-1",
+			TokenEndpointURL:   tlsServer.URL,
+			InsecureSkipVerify: true,
+		},
+	)
+	r.NoError(err)
+	loginMsg := &msg.Login{}
+	r.NoError(providerInsecure.SetLogin(loginMsg))
+	r.Equal("tls-oidc-token", loginMsg.PrivilegeKey)
+
+	// SetNewWorkConn should be a no-op when AuthScopeNewWorkConns is not enabled
+	workMsgNoScope := &msg.NewWorkConn{}
+	r.NoError(providerInsecure.SetNewWorkConn(workMsgNoScope))
+	r.Empty(workMsgNoScope.PrivilegeKey)
+
+	// 3. Error cases for TrustedCaFile and ProxyURL
+	_, err = auth.NewOidcAuthSetter(nil, v1.AuthOIDCClientConfig{
+		ClientID:         "client-1",
+		TokenEndpointURL: tlsServer.URL,
+		TrustedCaFile:    filepath.Join(t.TempDir(), "nonexistent.pem"),
+	})
+	r.ErrorContains(err, "failed to read OIDC CA certificate file")
+
+	badCAFile := filepath.Join(t.TempDir(), "bad-ca.pem")
+	r.NoError(os.WriteFile(badCAFile, []byte("not-a-valid-pem"), 0o600))
+	_, err = auth.NewOidcAuthSetter(nil, v1.AuthOIDCClientConfig{
+		ClientID:         "client-1",
+		TokenEndpointURL: tlsServer.URL,
+		TrustedCaFile:    badCAFile,
+	})
+	r.ErrorContains(err, "failed to parse OIDC CA certificate")
+
+	_, err = auth.NewOidcAuthSetter(nil, v1.AuthOIDCClientConfig{
+		ClientID:         "client-1",
+		TokenEndpointURL: tlsServer.URL,
+		ProxyURL:         "://invalid-proxy-url",
+	})
+	r.ErrorContains(err, "failed to parse OIDC proxy URL")
+
+	// Valid ProxyURL constructs HTTP client without error
+	_, err = auth.NewOidcAuthSetter(nil, v1.AuthOIDCClientConfig{
+		ClientID:         "client-1",
+		TokenEndpointURL: tlsServer.URL,
+		ProxyURL:         "http://127.0.0.1:8080",
+	})
+	r.NoError(err)
+}
+
+func TestOidcTokenSourceAuthProviderAndConsumerScopes(t *testing.T) {
+	r := require.New(t)
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "oidc_token")
+	r.NoError(os.WriteFile(tokenFile, []byte("  dynamic-oidc-jwt-token \n"), 0o600))
+
+	// 1. BuildClientAuth with OIDC TokenSource
+	clientAuth, err := auth.BuildClientAuth(&v1.AuthClientConfig{
+		Method:           v1.AuthMethodOIDC,
+		AdditionalScopes: []v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns},
+		OIDC: v1.AuthOIDCClientConfig{
+			TokenSource: &v1.ValueSource{
+				Type: "file",
+				File: &v1.FileSource{Path: tokenFile},
+			},
+		},
+	})
+	r.NoError(err)
+
+	loginMsg := &msg.Login{}
+	r.NoError(clientAuth.Setter.SetLogin(loginMsg))
+	r.Equal("dynamic-oidc-jwt-token", loginMsg.PrivilegeKey)
+
+	pingMsg := &msg.Ping{}
+	r.NoError(clientAuth.Setter.SetPing(pingMsg))
+	r.Equal("dynamic-oidc-jwt-token", pingMsg.PrivilegeKey)
+
+	workMsg := &msg.NewWorkConn{}
+	r.NoError(clientAuth.Setter.SetNewWorkConn(workMsg))
+	r.Equal("dynamic-oidc-jwt-token", workMsg.PrivilegeKey)
+
+	// 2. OidcTokenSourceAuthProvider without additional scopes does not populate Ping or NewWorkConn
+	noScopeSetter := auth.NewOidcTokenSourceAuthSetter(nil, &v1.ValueSource{
+		Type: "file",
+		File: &v1.FileSource{Path: tokenFile},
+	})
+	emptyPing := &msg.Ping{}
+	r.NoError(noScopeSetter.SetPing(emptyPing))
+	r.Empty(emptyPing.PrivilegeKey)
+
+	emptyWork := &msg.NewWorkConn{}
+	r.NoError(noScopeSetter.SetNewWorkConn(emptyWork))
+	r.Empty(emptyWork.PrivilegeKey)
+
+	// 3. Error when ValueSource fails to resolve
+	brokenSetter := auth.NewOidcTokenSourceAuthSetter(
+		[]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns},
+		&v1.ValueSource{
+			Type: "file",
+			File: &v1.FileSource{Path: filepath.Join(tmpDir, "missing")},
+		},
+	)
+	r.ErrorContains(brokenSetter.SetLogin(&msg.Login{}), "couldn't acquire OIDC token")
+	r.ErrorContains(brokenSetter.SetPing(&msg.Ping{}), "couldn't acquire OIDC token")
+	r.ErrorContains(brokenSetter.SetNewWorkConn(&msg.NewWorkConn{}), "couldn't acquire OIDC token")
+
+	// 4. OidcAuthConsumer without additional scopes skips verification on Ping and NewWorkConn
+	verifier := &subjectTokenVerifier{subjects: map[string]string{"good": "sub1"}}
+	noScopeConsumer := auth.NewOidcAuthVerifier(nil, verifier)
+	r.ErrorContains(noScopeConsumer.VerifyLogin(&msg.Login{PrivilegeKey: "bad"}), "invalid OIDC token in login")
+	r.NoError(noScopeConsumer.VerifyPing(&msg.Ping{PrivilegeKey: "bad"}))
+	r.NoError(noScopeConsumer.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "bad"}))
+
+	// 5. BuildClientAuth and BuildServerAuth with token method + TokenSource
+	sharedTokenFile := filepath.Join(tmpDir, "shared_token")
+	r.NoError(os.WriteFile(sharedTokenFile, []byte("file-resolved-secret\n"), 0o600))
+
+	ca, err := auth.BuildClientAuth(&v1.AuthClientConfig{
+		Method: v1.AuthMethodToken,
+		TokenSource: &v1.ValueSource{
+			Type: "file",
+			File: &v1.FileSource{Path: sharedTokenFile},
+		},
+	})
+	r.NoError(err)
+	r.Equal([]byte("file-resolved-secret"), ca.EncryptionKey())
+
+	sa, err := auth.BuildServerAuth(&v1.AuthServerConfig{
+		Method: v1.AuthMethodToken,
+		TokenSource: &v1.ValueSource{
+			Type: "file",
+			File: &v1.FileSource{Path: sharedTokenFile},
+		},
+	})
+	r.NoError(err)
+	r.Equal([]byte("file-resolved-secret"), sa.EncryptionKey())
+
+	// Missing token source file returns error in BuildClientAuth / BuildServerAuth
+	_, err = auth.BuildClientAuth(&v1.AuthClientConfig{
+		Method: v1.AuthMethodToken,
+		TokenSource: &v1.ValueSource{
+			Type: "file",
+			File: &v1.FileSource{Path: filepath.Join(tmpDir, "missing")},
+		},
+	})
+	r.ErrorContains(err, "failed to resolve auth.tokenSource")
+
+	_, err = auth.BuildServerAuth(&v1.AuthServerConfig{
+		Method: v1.AuthMethodToken,
+		TokenSource: &v1.ValueSource{
+			Type: "file",
+			File: &v1.FileSource{Path: filepath.Join(tmpDir, "missing")},
+		},
+	})
+	r.ErrorContains(err, "failed to resolve auth.tokenSource")
+
+	// NewTokenVerifier / BuildServerAuth OIDC with discovery server and invalid issuer
+	var discoveryServer *httptest.Server
+	discoveryServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/.well-known/openid-configuration" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"issuer":   discoveryServer.URL,
+				"jwks_uri": discoveryServer.URL + "/jwks",
+			})
+			return
+		}
+		http.NotFound(w, req)
+	}))
+	defer discoveryServer.Close()
+
+	oidcServerAuth, err := auth.BuildServerAuth(&v1.AuthServerConfig{
+		Method: v1.AuthMethodOIDC,
+		OIDC: v1.AuthOIDCServerConfig{
+			Issuer:          discoveryServer.URL,
+			Audience:        "my-aud",
+			SkipExpiryCheck: true,
+			SkipIssuerCheck: true,
+		},
+	})
+	r.NoError(err)
+	r.NotNil(oidcServerAuth.Verifier)
+
+	_, err = auth.BuildServerAuth(&v1.AuthServerConfig{
+		Method: v1.AuthMethodOIDC,
+		OIDC: v1.AuthOIDCServerConfig{
+			Issuer: "http://127.0.0.1:1",
+		},
+	})
+	r.Error(err)
+
+	// 6. Nil messages and nil dependencies return errors instead of panicking
+	r.ErrorContains(clientAuth.Setter.SetLogin(nil), "login message is nil")
+	r.ErrorContains(clientAuth.Setter.SetPing(nil), "ping message is nil")
+	r.ErrorContains(clientAuth.Setter.SetNewWorkConn(nil), "newWorkConn message is nil")
+
+	nilValueSourceSetter := auth.NewOidcTokenSourceAuthSetter(nil, nil)
+	r.ErrorContains(nilValueSourceSetter.SetLogin(&msg.Login{}), "token source is nil")
+
+	scopedConsumer := auth.NewOidcAuthVerifier(
+		[]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns},
+		verifier,
+	)
+	r.ErrorContains(scopedConsumer.VerifyLogin(nil), "login message is nil")
+	r.ErrorContains(scopedConsumer.VerifyPing(nil), "ping message is nil")
+	r.ErrorContains(scopedConsumer.VerifyNewWorkConn(nil), "newWorkConn message is nil")
+
+	nilVerifierConsumer := auth.NewOidcAuthVerifier(
+		[]v1.AuthScope{v1.AuthScopeHeartBeats},
+		nil,
+	)
+	r.ErrorContains(nilVerifierConsumer.VerifyLogin(&msg.Login{PrivilegeKey: "tok"}), "verifier is nil")
+	r.ErrorContains(nilVerifierConsumer.VerifyPing(&msg.Ping{PrivilegeKey: "tok"}), "verifier is nil")
 }

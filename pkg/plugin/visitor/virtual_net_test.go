@@ -18,6 +18,7 @@ package visitor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/xlog"
 )
 
@@ -242,4 +244,76 @@ func TestVirtualNetPluginOldConnectionCleanupKeepsReplacementRoute(t *testing.T)
 
 	require.Same(t, newControllerConn, controller.owner())
 	require.True(t, oldControllerConn.closed.Load())
+}
+
+func TestVisitorPluginRegistryAndRunLoop(t *testing.T) {
+	require := require.New(t)
+
+	// 1. Registry error and panic
+	_, err := Create("nonexistent", PluginContext{Ctx: context.Background()}, nil)
+	require.ErrorContains(err, "is not registered")
+	require.Panics(func() {
+		Register(v1.VisitorPluginVirtualNet, NewVirtualNetPlugin)
+	})
+
+	// 2. NewVirtualNetPlugin validation (empty DestinationIP, invalid IP, IPv4, IPv6)
+	_, err = Create(v1.VisitorPluginVirtualNet, PluginContext{Ctx: context.Background()}, &v1.VirtualNetVisitorPluginOptions{})
+	require.ErrorContains(err, "destinationIP is required")
+
+	_, err = Create(v1.VisitorPluginVirtualNet, PluginContext{Ctx: context.Background()}, &v1.VirtualNetVisitorPluginOptions{
+		DestinationIP: "not-an-ip",
+	})
+	require.ErrorContains(err, "invalid destination IP address")
+
+	p4, err := Create(v1.VisitorPluginVirtualNet, PluginContext{
+		Name: "v4",
+		Ctx:  context.Background(),
+	}, &v1.VirtualNetVisitorPluginOptions{
+		DestinationIP: "10.0.0.5",
+	})
+	require.NoError(err)
+	require.Equal(v1.VisitorPluginVirtualNet, p4.Name())
+	p4.Start() // no-op when routeController is nil
+	require.NoError(p4.Close())
+
+	p6, err := Create(v1.VisitorPluginVirtualNet, PluginContext{
+		Name: "v6",
+		Ctx:  context.Background(),
+	}, &v1.VirtualNetVisitorPluginOptions{
+		DestinationIP: "fd00::1",
+	})
+	require.NoError(err)
+	vp6 := p6.(*VirtualNetPlugin)
+	require.Len(vp6.routes, 1)
+	require.Equal("fd00::1/128", vp6.routes[0].String())
+	require.NoError(p6.Close())
+
+	// 3. Start() and run() loop with CloseWithError and normal Close followed by Plugin.Close()
+	controller := newFakeClientRouteController()
+	connCh := make(chan net.Conn, 2)
+	vp := newTestVirtualNetPlugin(t, controller)
+	vp.pluginCtx.SendConnToVisitor = func(c net.Conn) {
+		connCh <- c
+	}
+	vp.Start()
+
+	var firstConn net.Conn
+	select {
+	case firstConn = <-connCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SendConnToVisitor")
+	}
+
+	// Trigger CloseWithError on the CloseNotifyConn, then cancel via Close() during reconnect wait
+	if closeErrConn, ok := firstConn.(interface{ CloseWithError(error) error }); ok {
+		require.NoError(closeErrConn.CloseWithError(errors.New("simulated tunnel error")))
+	} else {
+		_ = firstConn.Close()
+	}
+
+	require.Eventually(func() bool {
+		_, unreg := controller.callCounts()
+		return unreg >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+	require.NoError(vp.Close())
 }

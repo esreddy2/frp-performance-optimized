@@ -236,11 +236,13 @@ func (m *DatagramMux) Unregister(name string) {
 // ErrDatagramTooLarge when it doesn't fit the connection's current datagram
 // budget (caller falls back to the stream).
 func (m *DatagramMux) Send(name string, remoteAddr *net.UDPAddr, payload []byte) error {
-	frame, err := encodeDgramFrame(name, remoteAddr, payload)
+	bp, frame, err := encodeDgramFramePooled(name, remoteAddr, payload)
 	if err != nil {
 		return err
 	}
 	err = m.qc.SendDatagram(frame)
+	*bp = frame[:0]
+	dgramFramePool.Put(bp)
 	if err != nil {
 		var tooLarge *quic.DatagramTooLargeError
 		if errors.As(err, &tooLarge) {
@@ -257,16 +259,21 @@ func (m *DatagramMux) Send(name string, remoteAddr *net.UDPAddr, payload []byte)
 }
 
 func encodeDgramFrame(name string, remoteAddr *net.UDPAddr, payload []byte) ([]byte, error) {
+	_, frame, err := encodeDgramFramePooled(name, remoteAddr, payload)
+	return frame, err
+}
+
+func encodeDgramFramePooled(name string, remoteAddr *net.UDPAddr, payload []byte) (*[]byte, []byte, error) {
 	if remoteAddr == nil {
-		return nil, errors.New("udp datagram without remote address")
+		return nil, nil, errors.New("udp datagram without remote address")
 	}
 	addr := remoteAddr.String()
 	if len(name) == 0 || len(name) > naming.MaxDatagramIdentifierLength {
-		return nil, fmt.Errorf("%w: proxy name %d bytes exceeds %d",
+		return nil, nil, fmt.Errorf("%w: proxy name %d bytes exceeds %d",
 			ErrDatagramHeaderTooLong, len(name), naming.MaxDatagramIdentifierLength)
 	}
 	if len(addr) > maxDatagramAddrLength {
-		return nil, fmt.Errorf("%w: address %d bytes exceeds %d",
+		return nil, nil, fmt.Errorf("%w: address %d bytes exceeds %d",
 			ErrDatagramHeaderTooLong, len(addr), maxDatagramAddrLength)
 	}
 	// Enforce the budget before building the frame: MTU-sized payloads
@@ -274,12 +281,13 @@ func encodeDgramFrame(name string, remoteAddr *net.UDPAddr, payload []byte) ([]b
 	// allocation and copy just to throw the frame away.
 	frameLen := dgramFrameOverhead(name, addr) + len(payload)
 	if frameLen > DatagramFrameBudget {
-		return nil, &DatagramTooLargeError{
+		return nil, nil, &DatagramTooLargeError{
 			PayloadSize: len(payload),
 			Limit:       MaxDatagramPayloadSize(name, remoteAddr),
 		}
 	}
-	frame := dgramFramePool.Get().([]byte)
+	bp := dgramFramePool.Get().(*[]byte)
+	frame := *bp
 	if cap(frame) < frameLen {
 		frame = make([]byte, 0, frameLen)
 	} else {
@@ -290,7 +298,7 @@ func encodeDgramFrame(name string, remoteAddr *net.UDPAddr, payload []byte) ([]b
 	frame = append(frame, byte(len(addr)))
 	frame = append(frame, addr...)
 	frame = append(frame, payload...)
-	return frame, nil
+	return bp, frame, nil
 }
 
 func decodeDgramFrame(data []byte) (name string, remoteAddr *net.UDPAddr, payload []byte, err error) {
@@ -335,5 +343,8 @@ func decodeDgramFrame(data []byte) (name string, remoteAddr *net.UDPAddr, payloa
 }
 
 var dgramFramePool = sync.Pool{
-	New: func() any { return make([]byte, 0, 256) },
+	New: func() any {
+		b := make([]byte, 0, 256)
+		return &b
+	},
 }

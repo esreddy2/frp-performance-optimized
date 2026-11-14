@@ -15,6 +15,7 @@
 package ssh
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -136,13 +137,32 @@ func (g *Gateway) handleConn(conn net.Conn) {
 	}
 }
 
+func trimCommentAndBlankLines(in []byte) []byte {
+	for len(in) > 0 {
+		line, rest, found := bytes.Cut(in, []byte{'\n'})
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) > 0 && trimmed[0] != '#' {
+			return in
+		}
+		if !found {
+			return nil
+		}
+		in = rest
+	}
+	return nil
+}
+
 func loadAuthorizedKeysFromFile(path string) (map[string]string, error) {
 	authorizedKeysMap := make(map[string]string) // value is username
 	authorizedKeysBytes, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	for len(authorizedKeysBytes) > 0 {
+	for {
+		authorizedKeysBytes = trimCommentAndBlankLines(authorizedKeysBytes)
+		if len(authorizedKeysBytes) == 0 {
+			break
+		}
 		pubKey, comment, _, rest, err := ssh.ParseAuthorizedKey(authorizedKeysBytes)
 		if err != nil {
 			return nil, err

@@ -244,3 +244,70 @@ func TestValueSource_Resolve(t *testing.T) {
 		})
 	}
 }
+
+func TestExecSource_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		es      *ExecSource
+		wantErr bool
+	}{
+		{name: "nil", es: nil, wantErr: true},
+		{name: "empty command", es: &ExecSource{Command: ""}, wantErr: true},
+		{name: "whitespace command", es: &ExecSource{Command: "   \t"}, wantErr: true},
+		{name: "nul in command", es: &ExecSource{Command: "echo\x00"}, wantErr: true},
+		{name: "nul in arg", es: &ExecSource{Command: "echo", Args: []string{"ok", "bad\x00arg"}}, wantErr: true},
+		{name: "empty env name", es: &ExecSource{Command: "echo", Env: []ExecEnvVar{{Name: "", Value: "1"}}}, wantErr: true},
+		{name: "equals in env name", es: &ExecSource{Command: "echo", Env: []ExecEnvVar{{Name: "A=B", Value: "1"}}}, wantErr: true},
+		{name: "nul in env value", es: &ExecSource{Command: "echo", Env: []ExecEnvVar{{Name: "A", Value: "1\x002"}}}, wantErr: true},
+		{name: "valid", es: &ExecSource{Command: "echo", Args: []string{"hi"}, Env: []ExecEnvVar{{Name: "A", Value: "1"}}}, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.es.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ExecSource.Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestExecSource_Resolve(t *testing.T) {
+	t.Run("valid command trims whitespace", func(t *testing.T) {
+		es := &ExecSource{
+			Command: "sh",
+			Args:    []string{"-c", "printf '  secret-token\\n'"},
+		}
+		got, err := es.Resolve(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "secret-token" {
+			t.Fatalf("got %q, want %q", got, "secret-token")
+		}
+	})
+
+	t.Run("respects context deadline", func(t *testing.T) {
+		es := &ExecSource{
+			Command: "sh",
+			Args:    []string{"-c", "sleep 5"},
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*1e6) // 50ms
+		defer cancel()
+		_, err := es.Resolve(ctx)
+		if err == nil {
+			t.Fatal("expected timeout error, got nil")
+		}
+	})
+
+	t.Run("rejects oversized stdout", func(t *testing.T) {
+		es := &ExecSource{
+			Command: "sh",
+			Args:    []string{"-c", "head -c 2000000 /dev/zero | tr '\\0' 'a'"},
+		}
+		_, err := es.Resolve(context.Background())
+		if err == nil {
+			t.Fatal("expected output size limit error, got nil")
+		}
+	})
+}

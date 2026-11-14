@@ -55,10 +55,12 @@ type XTCPVisitor struct {
 func (sv *XTCPVisitor) Run() (err error) {
 	sv.ctx, sv.cancel = context.WithCancel(sv.ctx)
 
-	if sv.cfg.Protocol == "kcp" {
-		sv.session = NewKCPTunnelSession()
-	} else {
-		sv.session = NewQUICTunnelSession(sv.clientCfg)
+	if sv.session == nil {
+		if sv.cfg.Protocol == "kcp" {
+			sv.session = NewKCPTunnelSession()
+		} else {
+			sv.session = NewQUICTunnelSession(sv.clientCfg)
+		}
 	}
 
 	if sv.cfg.BindPort > 0 {
@@ -72,7 +74,11 @@ func (sv *XTCPVisitor) Run() (err error) {
 	go sv.acceptLoop(sv.internalLn, "xtcp internal", sv.handleConn)
 	go sv.processTunnelStartEvents()
 	if sv.cfg.KeepTunnelOpen {
-		sv.retryLimiter = rate.NewLimiter(rate.Every(time.Hour/time.Duration(sv.cfg.MaxRetriesAnHour)), sv.cfg.MaxRetriesAnHour)
+		maxRetries := sv.cfg.MaxRetriesAnHour
+		if maxRetries <= 0 {
+			maxRetries = 8
+		}
+		sv.retryLimiter = rate.NewLimiter(rate.Every(time.Hour/time.Duration(maxRetries)), maxRetries)
 		go sv.keepTunnelOpenWorker()
 	}
 
@@ -105,7 +111,13 @@ func (sv *XTCPVisitor) processTunnelStartEvents() {
 			duration := time.Since(start)
 			// avoid too frequently
 			if duration < 10*time.Second {
-				time.Sleep(10*time.Second - duration)
+				timer := time.NewTimer(10*time.Second - duration)
+				select {
+				case <-sv.ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
 		}
 	}
@@ -113,7 +125,11 @@ func (sv *XTCPVisitor) processTunnelStartEvents() {
 
 func (sv *XTCPVisitor) keepTunnelOpenWorker() {
 	xl := xlog.FromContextSafe(sv.ctx)
-	ticker := time.NewTicker(time.Duration(sv.cfg.MinRetryInterval) * time.Second)
+	minRetryInterval := sv.cfg.MinRetryInterval
+	if minRetryInterval <= 0 {
+		minRetryInterval = 90
+	}
+	ticker := time.NewTicker(time.Duration(minRetryInterval) * time.Second)
 	defer ticker.Stop()
 
 	sv.startTunnelCh <- struct{}{}
@@ -402,6 +418,9 @@ func NewQUICTunnelSession(clientCfg *v1.ClientCommonConfig) TunnelSession {
 }
 
 func (qs *QUICTunnelSession) Init(ctx context.Context, listenConn *net.UDPConn, raddr *net.UDPAddr) error {
+	// XTCP peer proxies generate an ephemeral self-signed certificate via
+	// transport.NewServerTLSConfig("", "", ""), so no CA trust root is available
+	// on the visitor side; peer authentication is performed via the nathole SecretKey.
 	tlsConfig, err := transport.NewClientTLSConfig("", "", "", raddr.String())
 	if err != nil {
 		return fmt.Errorf("create tls config error: %v", err)

@@ -16,6 +16,7 @@ package tcpmux
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net"
@@ -84,7 +85,9 @@ func (muxer *HTTPConnectTCPMuxer) sendConnectResponse(c net.Conn, _ map[string]s
 func (muxer *HTTPConnectTCPMuxer) auth(c net.Conn, username, password string, reqInfo map[string]string) (bool, error) {
 	reqUsername := reqInfo["HTTPUser"]
 	reqPassword := reqInfo["HTTPPwd"]
-	if username == reqUsername && password == reqPassword {
+	userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(reqUsername))
+	passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(reqPassword))
+	if (userMatch & passMatch) == 1 {
 		return true, nil
 	}
 

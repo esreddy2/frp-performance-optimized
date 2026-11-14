@@ -16,6 +16,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/fatedier/frp/pkg/util/log"
@@ -43,7 +44,8 @@ func MakeHTTPHandlerFunc(handler APIHandler) http.HandlerFunc {
 		if err != nil {
 			log.Warnf("http response [%s]: error: %v", r.URL.Path, err)
 			code := http.StatusInternalServerError
-			if e, ok := err.(*Error); ok {
+			var e *Error
+			if errors.As(err, &e) {
 				code = e.Code
 			}
 
@@ -79,7 +81,8 @@ func MakeHTTPHandlerFuncV2(handler APIHandler) http.HandlerFunc {
 		if err != nil {
 			log.Warnf("http response [%s]: error: %v", r.URL.Path, err)
 			code := http.StatusInternalServerError
-			if e, ok := err.(*Error); ok {
+			var e *Error
+			if errors.As(err, &e) {
 				code = e.Code
 			}
 

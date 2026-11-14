@@ -43,14 +43,17 @@ func (p *ProxyDefinition) Validate(pathName string, isUpdate bool) error {
 }
 
 func (p *ProxyDefinition) ToConfigurer() (v1.ProxyConfigurer, error) {
-	block, _, _ := p.activeBlock()
-	if block == nil {
+	block, blockType, blockCount := p.activeBlock()
+	if blockCount != 1 || block == nil {
 		return nil, fmt.Errorf("exactly one proxy type block is required")
+	}
+	if p.Type != "" && blockType != p.Type {
+		return nil, fmt.Errorf("proxy type block %q does not match type %q", blockType, p.Type)
 	}
 
 	cfg := block
 	cfg.GetBaseConfig().Name = p.Name
-	cfg.GetBaseConfig().Type = p.Type
+	cfg.GetBaseConfig().Type = blockType
 	return cfg, nil
 }
 

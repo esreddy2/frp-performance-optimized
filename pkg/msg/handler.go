@@ -114,11 +114,16 @@ func AsyncHandler(f func(Message)) func(Message) {
 type Dispatcher struct {
 	rw ReadWriter
 
-	sendCh   chan Message
-	doneCh   chan struct{}
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	sendCh       chan Message
+	doneCh       chan struct{}
+	stopCh       chan struct{}
+	stopOnce     sync.Once
+	runOnce      sync.Once
+	asyncMu      sync.Mutex
+	asyncStopped bool
+	asyncWg      sync.WaitGroup
 	// Handlers keyed by message type byte (from msgTypeMap) for fast lookup without reflection.
+	handlersMu  sync.RWMutex
 	msgHandlers map[byte]func(Message)
 }
 
@@ -137,10 +142,12 @@ func NewDispatcher(rw ReadWriter) *Dispatcher {
 	}
 }
 
-// Run will block until io.EOF or some error occurs.
+// Run starts the dispatcher send and read loops at most once.
 func (d *Dispatcher) Run() {
-	go d.sendLoop()
-	go d.readLoop()
+	d.runOnce.Do(func() {
+		go d.sendLoop()
+		go d.readLoop()
+	})
 }
 
 // stop rejects new sends and interrupts ReadMsg when supported by rw. Done remains
@@ -186,7 +193,10 @@ func (d *Dispatcher) readLoop() {
 		default:
 		}
 
-		if handler, ok := d.msgHandlers[messageTypeByte(m)]; ok {
+		d.handlersMu.RLock()
+		handler, ok := d.msgHandlers[messageTypeByte(m)]
+		d.handlersMu.RUnlock()
+		if ok && handler != nil {
 			handler(m)
 		}
 	}
@@ -219,7 +229,38 @@ func (d *Dispatcher) enqueue(m Message) error {
 }
 
 func (d *Dispatcher) RegisterHandler(msg Message, handler func(Message)) {
+	d.handlersMu.Lock()
 	d.msgHandlers[messageTypeByte(msg)] = handler
+	d.handlersMu.Unlock()
+}
+
+// RegisterAsyncHandler registers an asynchronous handler whose goroutines are
+// tracked and can be awaited with WaitAsync.
+func (d *Dispatcher) RegisterAsyncHandler(msg Message, handler func(Message)) {
+	d.RegisterHandler(msg, func(m Message) {
+		d.asyncMu.Lock()
+		if d.asyncStopped {
+			d.asyncMu.Unlock()
+			return
+		}
+		d.asyncWg.Add(1)
+		d.asyncMu.Unlock()
+
+		go func() {
+			defer d.asyncWg.Done()
+			defer func() { _ = recover() }()
+			handler(m)
+		}()
+	})
+}
+
+// WaitAsync prevents new async handler goroutines from being spawned and
+// waits for all in-flight goroutines spawned by RegisterAsyncHandler to finish.
+func (d *Dispatcher) WaitAsync() {
+	d.asyncMu.Lock()
+	d.asyncStopped = true
+	d.asyncMu.Unlock()
+	d.asyncWg.Wait()
 }
 
 // messageTypeByte returns the message type byte for a given message.

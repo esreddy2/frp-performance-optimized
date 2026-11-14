@@ -121,7 +121,7 @@ transport.socketMark = 1 # Linux fwmark, defaults to 1
 **Host Setup on Linux:**
 ```bash
 # Grant networking capabilities to frpc binary (or run via systemd AmbientCapabilities)
-sudo setcap cap_net_admin,cap_net_raw+ep $(which frpc)
+sudo setcap cap_net_admin+ep $(which frpc)
 
 # Enable routing sysctls
 sudo sysctl -w net.ipv4.ip_forward=1

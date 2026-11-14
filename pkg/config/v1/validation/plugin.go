@@ -24,6 +24,8 @@ func ValidateClientPluginOptions(c v1.ClientPluginOptions) error {
 	switch v := c.(type) {
 	case *v1.HTTP2HTTPSPluginOptions:
 		return validateHTTP2HTTPSPluginOptions(v)
+	case *v1.HTTP2HTTPPluginOptions:
+		return validateHTTP2HTTPPluginOptions(v)
 	case *v1.HTTPS2HTTPPluginOptions:
 		return validateHTTPS2HTTPPluginOptions(v)
 	case *v1.HTTPS2HTTPSPluginOptions:
@@ -39,6 +41,13 @@ func ValidateClientPluginOptions(c v1.ClientPluginOptions) error {
 }
 
 func validateHTTP2HTTPSPluginOptions(c *v1.HTTP2HTTPSPluginOptions) error {
+	if c.LocalAddr == "" {
+		return errors.New("localAddr is required")
+	}
+	return nil
+}
+
+func validateHTTP2HTTPPluginOptions(c *v1.HTTP2HTTPPluginOptions) error {
 	if c.LocalAddr == "" {
 		return errors.New("localAddr is required")
 	}
@@ -76,6 +85,20 @@ func validateUnixDomainSocketPluginOptions(c *v1.UnixDomainSocketPluginOptions) 
 func validateTLS2RawPluginOptions(c *v1.TLS2RawPluginOptions) error {
 	if c.LocalAddr == "" {
 		return errors.New("localAddr is required")
+	}
+	return nil
+}
+
+func ValidateVisitorPluginOptions(c v1.VisitorPluginOptions) error {
+	if v, ok := c.(*v1.VirtualNetVisitorPluginOptions); ok {
+		return validateVirtualNetVisitorPluginOptions(v)
+	}
+	return nil
+}
+
+func validateVirtualNetVisitorPluginOptions(c *v1.VirtualNetVisitorPluginOptions) error {
+	if c.DestinationIP == "" {
+		return errors.New("destinationIP is required")
 	}
 	return nil
 }

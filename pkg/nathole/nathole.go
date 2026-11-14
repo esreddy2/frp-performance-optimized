@@ -16,12 +16,12 @@ package nathole
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
-	"math/rand/v2"
+	"math/big"
 	"net"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/fatedier/golib/pool"
@@ -30,6 +30,7 @@ import (
 
 	"github.com/fatedier/frp/pkg/msg"
 	"github.com/fatedier/frp/pkg/transport"
+	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/xlog"
 )
 
@@ -350,11 +351,19 @@ func sendSidMessage(
 	if transactionID == "" {
 		transactionID = NewTransactionID()
 	}
+	nonceLen, err := rand.Int(rand.Reader, big.NewInt(20))
+	if err != nil {
+		return err
+	}
+	nonce, err := util.RandIDWithLen(int(nonceLen.Int64()))
+	if err != nil {
+		return err
+	}
 	m := &msg.NatHoleSid{
 		TransactionID: transactionID,
 		Sid:           sid,
 		Response:      false,
-		Nonce:         strings.Repeat("0", rand.IntN(20)),
+		Nonce:         nonce,
 	}
 	buf, err := EncodeMessage(m, key)
 	if err != nil {
@@ -411,7 +420,11 @@ func sendSidMessageToRandomPorts(
 	used := sets.New[int]()
 	getUnusedPort := func() int {
 		for range 10 {
-			port := rand.IntN(65535-1024) + 1024
+			n, err := rand.Int(rand.Reader, big.NewInt(65535-1024))
+			if err != nil {
+				return 0
+			}
+			port := int(n.Int64()) + 1024
 			if !used.Has(port) {
 				used.Insert(port)
 				return port

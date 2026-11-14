@@ -80,6 +80,9 @@ func (c *Controller) Run() error {
 
 // handlePacket processes a single packet. The caller is responsible for managing the buffer.
 func (c *Controller) handlePacket(buf []byte) {
+	if len(buf) == 0 {
+		return
+	}
 	log.Tracef("vnet read from tun [%d]: %s", len(buf), base64.StdEncoding.EncodeToString(buf))
 
 	var src, dst net.IP
@@ -213,22 +216,25 @@ func (c *Controller) readLoopServer(ctx context.Context, conn io.ReadWriteCloser
 			continue
 		}
 
-		// Register source IP to connection mapping
-		if waterutil.IsIPv4(data) || waterutil.IsIPv6(data) {
-			var src net.IP
-			if waterutil.IsIPv4(data) {
-				header, err := ipv4.ParseHeader(data)
-				if err == nil {
-					src = header.Src
-					c.serverRouter.registerSrcIP(src, conn)
-				}
-			} else {
-				header, err := ipv6.ParseHeader(data)
-				if err == nil {
-					src = header.Src
-					c.serverRouter.registerSrcIP(src, conn)
-				}
+		// Validate IP header and register source IP to connection mapping
+		switch {
+		case waterutil.IsIPv4(data):
+			header, err := ipv4.ParseHeader(data)
+			if err != nil {
+				xl.Warnf("parse ipv4 header error: %v", err)
+				continue
 			}
+			c.serverRouter.registerSrcIP(header.Src, conn)
+		case waterutil.IsIPv6(data):
+			header, err := ipv6.ParseHeader(data)
+			if err != nil {
+				xl.Warnf("parse ipv6 header error: %v", err)
+				continue
+			}
+			c.serverRouter.registerSrcIP(header.Src, conn)
+		default:
+			xl.Tracef("unknown packet, discarded(%d)", len(data))
+			continue
 		}
 
 		xl.Tracef("vnet write to tun (server) [%d]: %s", len(data), base64.StdEncoding.EncodeToString(data))

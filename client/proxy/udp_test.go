@@ -258,22 +258,26 @@ func TestUDPProxyDatagramLaneEnforcesBandwidthLimit(t *testing.T) {
 
 	userAddr := &net.UDPAddr{IP: net.IPv4(198, 51, 100, 7), Port: 4242}
 	require.NoError(serverMux.Send(cfg.Name, userAddr, nil))
-	time.Sleep(100 * time.Millisecond)
+
+	var first time.Time
+	select {
+	case first = <-replies:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the client did not relay the first reply")
+	}
+
 	require.NoError(serverMux.Send(cfg.Name, userAddr, nil))
 
-	var sent []time.Time
-	for range 2 {
-		select {
-		case at := <-replies:
-			sent = append(sent, at)
-		case <-time.After(15 * time.Second):
-			t.Fatal("the client did not relay all replies")
-		}
+	var second time.Time
+	select {
+	case second = <-replies:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the client did not relay the second reply")
 	}
 
 	// The second reply is held back until the limiter has refilled the
 	// tokens that the first reply consumed.
-	require.Greater(sent[1].Sub(sent[0]), 700*time.Millisecond,
+	require.Greater(second.Sub(first), 700*time.Millisecond,
 		"the datagram lane did not enforce the bandwidth limit")
 }
 
@@ -846,7 +850,10 @@ func TestUDPProxyRetirementDoesNotRaceWithTheReader(t *testing.T) {
 	// on the read channel of the proxy.
 	rw, err := msg.NewUDPPacketReadWriter(client, "", "")
 	require.NoError(err)
-	require.NoError(msg.NewConn(client, rw).WriteMsg(&msg.UDPPacket{Content: []byte("payload")}))
+	require.NoError(msg.NewConn(client, rw).WriteMsg(&msg.UDPPacket{
+		Content:    []byte("payload"),
+		RemoteAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+	}))
 
 	// The local service received the packet, so the reader has sent it on
 	// the read channel of the proxy.
@@ -967,4 +974,179 @@ func (c *trackedConn) Close() error {
 	c.closed = true
 	c.mu.Unlock()
 	return c.Conn.Close()
+}
+
+func TestUDPProxyRetiresWorkConnOnReaderBreak(t *testing.T) {
+	require := require.New(t)
+
+	pxy := newUDPProxyForLifecycleTest(t, "udp-reader-break")
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+
+	pxy.InWorkConn(server, &msg.StartWorkConn{})
+
+	require.Eventually(func() bool {
+		pxy.mu.RLock()
+		defer pxy.mu.RUnlock()
+		return pxy.workConn != nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Closing the peer side causes readUDPWorkConn to return with an error.
+	// The reader's defer closeFn() must retire the work connection.
+	require.NoError(client.Close())
+
+	require.Eventually(func() bool {
+		pxy.mu.RLock()
+		defer pxy.mu.RUnlock()
+		return pxy.workConn == nil && pxy.closeCh == nil
+	}, 5*time.Second, 10*time.Millisecond, "workConn was not retired when reader exited")
+}
+
+func TestUDPProxyCloseWaitsAfterReaderBreakRetiresWorkConn(t *testing.T) {
+	require := require.New(t)
+
+	for range 20 {
+		pxy := newUDPProxyForLifecycleTest(t, "udp-close-after-reader-break")
+		client, server := net.Pipe()
+
+		pxy.InWorkConn(server, &msg.StartWorkConn{})
+		require.Eventually(func() bool {
+			pxy.mu.RLock()
+			defer pxy.mu.RUnlock()
+			return pxy.workConn != nil
+		}, 5*time.Second, time.Millisecond)
+
+		// Break the reader so closeFn retires workConn and clears workConnWg,
+		// then immediately call Close() to verify it still waits for pxy.wg.
+		require.NoError(client.Close())
+		require.Eventually(func() bool {
+			pxy.mu.RLock()
+			defer pxy.mu.RUnlock()
+			return pxy.workConn == nil
+		}, 5*time.Second, time.Millisecond)
+
+		pxy.Close()
+		// After Close() returns, pxy.wg must be drained (Wait returns immediately).
+		done := make(chan struct{})
+		go func() {
+			pxy.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("pxy.wg was not drained when Close() returned")
+		}
+	}
+}
+
+func TestUDPProxyCloseJoinsForwarderGoroutines(t *testing.T) {
+	require := require.New(t)
+
+	localAddr, received := startRecordingService(t)
+	pxy := newUDPProxyForLocalService(t, "udp-close-joins-forwarder", localAddr)
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	pxy.InWorkConn(server, &msg.StartWorkConn{})
+
+	rw, err := msg.NewUDPPacketReadWriter(client, "", "")
+	require.NoError(err)
+	require.NoError(msg.NewConn(client, rw).WriteMsg(&msg.UDPPacket{
+		Content:    []byte("hello-udp-forwarder"),
+		RemoteAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 23456},
+	}))
+
+	select {
+	case payload := <-received:
+		require.Equal("hello-udp-forwarder", string(payload))
+	case <-time.After(5 * time.Second):
+		t.Fatal("the local service did not receive the packet")
+	}
+
+	pxy.Close()
+
+	done := make(chan struct{})
+	go func() {
+		pxy.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pxy.wg was not drained after UDPProxy.Close() returned")
+	}
+}
+
+func TestSUDPProxyCloseJoinsForwarderGoroutines(t *testing.T) {
+	require := require.New(t)
+
+	localAddr, received := startRecordingService(t)
+	pxy := newSUDPProxyForLocalService(t, "sudp-close-joins-forwarder", localAddr)
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	pxy.InWorkConn(server, &msg.StartWorkConn{})
+
+	rw, err := msg.NewUDPPacketReadWriter(client, "", "")
+	require.NoError(err)
+	require.NoError(msg.NewConn(client, rw).WriteMsg(&msg.UDPPacket{
+		Content:    []byte("hello-sudp-forwarder"),
+		RemoteAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 23457},
+	}))
+
+	select {
+	case payload := <-received:
+		require.Equal("hello-sudp-forwarder", string(payload))
+	case <-time.After(5 * time.Second):
+		t.Fatal("the local service did not receive the packet")
+	}
+
+	pxy.Close()
+
+	done := make(chan struct{})
+	go func() {
+		pxy.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pxy.wg was not drained after SUDPProxy.Close() returned")
+	}
+}
+
+func TestSUDPProxyCloseWaitsAfterReaderBreakRetiresWorkConn(t *testing.T) {
+	require := require.New(t)
+
+	for range 20 {
+		pxy := newSUDPProxyForLifecycleTest(t, "sudp-close-after-reader-break")
+		client, server := net.Pipe()
+
+		pxy.InWorkConn(server, &msg.StartWorkConn{})
+		require.Eventually(func() bool {
+			pxy.mu.RLock()
+			defer pxy.mu.RUnlock()
+			return pxy.workConn != nil
+		}, 5*time.Second, time.Millisecond)
+
+		require.NoError(client.Close())
+		require.Eventually(func() bool {
+			pxy.mu.RLock()
+			defer pxy.mu.RUnlock()
+			return pxy.workConn == nil
+		}, 5*time.Second, time.Millisecond)
+
+		pxy.Close()
+		done := make(chan struct{})
+		go func() {
+			pxy.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("pxy.wg was not drained when SUDPProxy.Close() returned")
+		}
+	}
 }

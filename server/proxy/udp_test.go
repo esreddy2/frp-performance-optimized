@@ -76,21 +76,28 @@ func TestReadUDPWorkConnKeepsBusyConnectionAlive(t *testing.T) {
 	}()
 
 	// Keep the connection busy for much longer than the idle timeout.
-	busyUntil := time.Now().Add(10 * idleTimeout)
-	for time.Now().Before(busyUntil) {
+	ticker := time.NewTicker(idleTimeout / 10)
+	defer ticker.Stop()
+	deadline := time.NewTimer(10 * idleTimeout)
+	defer deadline.Stop()
+
+	for {
 		require.NoError(t, clientMsgConn.WriteMsg(&msg.UDPPacket{Content: []byte("payload")}))
 		select {
 		case <-readCh:
+		case <-closed:
+			t.Fatal("the work connection was torn down while it was busy")
 		case <-time.After(5 * time.Second):
 			t.Fatal("the work connection reader stopped delivering packets")
 		}
-		time.Sleep(idleTimeout / 10)
-	}
 
-	select {
-	case <-closed:
-		t.Fatal("the work connection was torn down while it was busy")
-	default:
+		select {
+		case <-deadline.C:
+			return
+		case <-closed:
+			t.Fatal("the work connection was torn down while it was busy")
+		case <-ticker.C:
+		}
 	}
 }
 

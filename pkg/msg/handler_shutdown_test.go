@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
+	"sync"
 	"testing"
 )
 
@@ -79,4 +81,84 @@ func TestDispatcherAcceptsReadWriterWithoutClose(t *testing.T) {
 		default:
 		}
 	})
+}
+
+func TestDispatcherRunIdempotentAndHandlerRace(t *testing.T) {
+	c := newRegressionControl(t)
+	d := NewDispatcher(c)
+
+	// Concurrent RegisterHandler and Run calls must not race or panic.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 20 {
+			d.RegisterHandler(&Ping{}, func(Message) {})
+		}
+	}()
+	for range 5 {
+		d.Run()
+	}
+	<-done
+	c.transport.close()
+	regressionAwait(t, d.Done(), "dispatcher exit after idempotent Run")
+}
+
+func TestDispatcherRegisterAsyncHandlerWaitAsync(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() {
+		_ = c1.Close()
+		_ = c2.Close()
+	})
+	d := NewDispatcher(NewV1ReadWriter(c1))
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	d.RegisterAsyncHandler(&Ping{}, func(Message) {
+		close(started)
+		<-release
+	})
+	d.Run()
+
+	// Deliver a Ping from the peer side.
+	go func() {
+		_ = WriteMsg(c2, &Ping{})
+	}()
+	regressionAwait(t, started, "async handler started")
+
+	waited := make(chan struct{})
+	go func() {
+		d.WaitAsync()
+		close(waited)
+	}()
+
+	close(release)
+	regressionAwait(t, waited, "WaitAsync returned after async handler finished")
+
+	_ = c1.Close()
+	_ = c2.Close()
+	regressionAwait(t, d.Done(), "dispatcher exit")
+}
+
+func TestDispatcherWaitAsyncConcurrentDispatch(t *testing.T) {
+	for range 20 {
+		c1, c2 := net.Pipe()
+		d := NewDispatcher(NewV1ReadWriter(c1))
+		d.RegisterAsyncHandler(&Ping{}, func(Message) {})
+		d.Run()
+
+		var writerWg sync.WaitGroup
+		writerWg.Go(func() {
+			for range 10 {
+				if err := WriteMsg(c2, &Ping{}); err != nil {
+					return
+				}
+			}
+		})
+
+		d.WaitAsync()
+		_ = c1.Close()
+		_ = c2.Close()
+		writerWg.Wait()
+		regressionAwait(t, d.Done(), "dispatcher exit")
+	}
 }

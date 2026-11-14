@@ -54,8 +54,10 @@ type SessionContext struct {
 
 type Control struct {
 	// service context
-	ctx context.Context
-	xl  *xlog.Logger
+	ctx      context.Context
+	hbCtx    context.Context
+	hbCancel context.CancelFunc
+	xl       *xlog.Logger
 
 	// session context
 	sessionCtx *SessionContext
@@ -69,6 +71,11 @@ type Control struct {
 	doneCh           chan struct{}
 	closeOnce        sync.Once
 	closeSessionOnce sync.Once
+	hbMu             sync.Mutex
+	hbStopped        bool
+	cfgMu            sync.Mutex
+	cfgGen           atomic.Uint64
+	wg               sync.WaitGroup
 
 	// of time.Time, last time got the Pong message
 	lastPong atomic.Value
@@ -84,9 +91,12 @@ type Control struct {
 }
 
 func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, error) {
+	hbCtx, hbCancel := context.WithCancel(ctx)
 	// new xlog instance
 	ctl := &Control{
 		ctx:        ctx,
+		hbCtx:      hbCtx,
+		hbCancel:   hbCancel,
 		xl:         xlog.FromContextSafe(ctx),
 		sessionCtx: sessionCtx,
 		doneCh:     make(chan struct{}),
@@ -114,11 +124,17 @@ func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, erro
 func (ctl *Control) Run(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) {
 	go ctl.worker()
 
-	// start all proxies
-	ctl.pm.UpdateAll(proxyCfgs)
+	ctl.cfgMu.Lock()
+	defer ctl.cfgMu.Unlock()
+	if ctl.cfgGen.Load() == 0 {
+		// start all proxies
+		ctl.pm.UpdateAll(proxyCfgs)
 
-	// start all visitors
-	ctl.vm.UpdateAll(visitorCfgs)
+		if ctl.cfgGen.Load() == 0 {
+			// start all visitors
+			ctl.vm.UpdateAll(visitorCfgs)
+		}
+	}
 }
 
 func (ctl *Control) SetInWorkConnCallback(cb func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) bool) {
@@ -236,6 +252,16 @@ func (ctl *Control) GracefulClose(d time.Duration) error {
 		time.Sleep(d)
 
 		ctl.closeSession()
+		ctl.hbMu.Lock()
+		ctl.hbStopped = true
+		if ctl.hbCancel != nil {
+			ctl.hbCancel()
+		}
+		ctl.hbMu.Unlock()
+		if ctl.msgDispatcher != nil {
+			ctl.msgDispatcher.WaitAsync()
+		}
+		ctl.wg.Wait()
 		close(ctl.doneCh)
 	})
 	<-ctl.doneCh
@@ -253,7 +279,7 @@ func (ctl *Control) connectServer() (*msg.Conn, error) {
 }
 
 func (ctl *Control) registerMsgHandlers() {
-	ctl.msgDispatcher.RegisterHandler(&msg.ReqWorkConn{}, msg.AsyncHandler(ctl.handleReqWorkConn))
+	ctl.msgDispatcher.RegisterAsyncHandler(&msg.ReqWorkConn{}, ctl.handleReqWorkConn)
 	ctl.msgDispatcher.RegisterHandler(&msg.NewProxyResp{}, ctl.handleNewProxyResp)
 	ctl.msgDispatcher.RegisterHandler(&msg.NatHoleResp{}, ctl.handleNatHoleResp)
 	ctl.msgDispatcher.RegisterHandler(&msg.Pong{}, ctl.handlePong)
@@ -262,6 +288,10 @@ func (ctl *Control) registerMsgHandlers() {
 // heartbeatWorker sends heartbeat to server and check heartbeat timeout.
 func (ctl *Control) heartbeatWorker() {
 	xl := ctl.xl
+	var stopCh <-chan struct{} = ctl.doneCh
+	if ctl.hbCtx != nil {
+		stopCh = ctl.hbCtx.Done()
+	}
 
 	if ctl.sessionCtx.Common.Transport.HeartbeatInterval > 0 {
 		// Send heartbeat to server.
@@ -284,33 +314,45 @@ func (ctl *Control) heartbeatWorker() {
 			return false, nil
 		}
 
-		go wait.BackoffUntil(sendHeartBeat,
-			wait.NewFastBackoffManager(wait.FastBackoffOptions{
-				Duration:           time.Duration(ctl.sessionCtx.Common.Transport.HeartbeatInterval) * time.Second,
-				InitDurationIfFail: time.Second,
-				Factor:             2.0,
-				Jitter:             0.1,
-				MaxDuration:        time.Duration(ctl.sessionCtx.Common.Transport.HeartbeatInterval) * time.Second,
-			}),
-			true, ctl.doneCh,
-		)
+		ctl.hbMu.Lock()
+		if !ctl.hbStopped {
+			ctl.wg.Go(func() {
+				wait.BackoffUntil(sendHeartBeat,
+					wait.NewFastBackoffManager(wait.FastBackoffOptions{
+						Duration:           time.Duration(ctl.sessionCtx.Common.Transport.HeartbeatInterval) * time.Second,
+						InitDurationIfFail: time.Second,
+						Factor:             2.0,
+						Jitter:             0.1,
+						MaxDuration:        time.Duration(ctl.sessionCtx.Common.Transport.HeartbeatInterval) * time.Second,
+					}),
+					true, stopCh,
+				)
+			})
+		}
+		ctl.hbMu.Unlock()
 	}
 
 	// Check heartbeat timeout.
 	if ctl.sessionCtx.Common.Transport.HeartbeatInterval > 0 && ctl.sessionCtx.Common.Transport.HeartbeatTimeout > 0 {
-		go wait.Until(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					xl.Errorf("heartbeat timeout check panic: %v", r)
-				}
-			}()
-			lastPong, _ := ctl.lastPong.Load().(time.Time)
-			if time.Since(lastPong) > time.Duration(ctl.sessionCtx.Common.Transport.HeartbeatTimeout)*time.Second {
-				xl.Warnf("heartbeat timeout")
-				ctl.closeSession()
-				return
-			}
-		}, time.Second, ctl.doneCh)
+		ctl.hbMu.Lock()
+		if !ctl.hbStopped {
+			ctl.wg.Go(func() {
+				wait.Until(func() {
+					defer func() {
+						if r := recover(); r != nil {
+							xl.Errorf("heartbeat timeout check panic: %v", r)
+						}
+					}()
+					lastPong, _ := ctl.lastPong.Load().(time.Time)
+					if time.Since(lastPong) > time.Duration(ctl.sessionCtx.Common.Transport.HeartbeatTimeout)*time.Second {
+						xl.Warnf("heartbeat timeout")
+						ctl.closeSession()
+						return
+					}
+				}, time.Second, stopCh)
+			})
+		}
+		ctl.hbMu.Unlock()
 	}
 }
 
@@ -322,7 +364,7 @@ func (ctl *Control) worker() {
 		}
 		ctl.GracefulClose(0)
 	}()
-	go ctl.heartbeatWorker()
+	ctl.heartbeatWorker()
 	go ctl.msgDispatcher.Run()
 
 	<-ctl.msgDispatcher.Done()
@@ -330,6 +372,12 @@ func (ctl *Control) worker() {
 }
 
 func (ctl *Control) UpdateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) error {
+	gen := ctl.cfgGen.Add(1)
+	ctl.cfgMu.Lock()
+	defer ctl.cfgMu.Unlock()
+	if ctl.cfgGen.Load() != gen {
+		return nil
+	}
 	ctl.vm.UpdateAll(visitorCfgs)
 	ctl.pm.UpdateAll(proxyCfgs)
 	return nil

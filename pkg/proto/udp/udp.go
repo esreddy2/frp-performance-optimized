@@ -15,6 +15,8 @@
 package udp
 
 import (
+	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -47,13 +49,30 @@ func GetContent(m *msg.UDPPacket) (buf []byte, err error) {
 // send on a closed channel panics, and the goroutine that sends is not always
 // able to recover from it. The stop channel ends the function instead.
 func ForwardUserConn(udpConn *net.UDPConn, readCh <-chan *msg.UDPPacket, sendCh chan<- *msg.UDPPacket, stopCh <-chan struct{}, bufSize int) {
+	forwardUserConn(udpConn, readCh, sendCh, stopCh, bufSize, nil)
+}
+
+func forwardUserConn(
+	udpConn *net.UDPConn,
+	readCh <-chan *msg.UDPPacket,
+	sendCh chan<- *msg.UDPPacket,
+	stopCh <-chan struct{},
+	bufSize int,
+	readerDone chan<- struct{},
+) {
 	// read
 	go func() {
+		if readerDone != nil {
+			defer close(readerDone)
+		}
 		for {
 			select {
 			case udpMsg, ok := <-readCh:
 				if !ok {
 					return
+				}
+				if udpMsg == nil {
+					continue
 				}
 				buf, err := GetContent(udpMsg)
 				if err != nil {
@@ -122,6 +141,7 @@ func removeUDPConn(udpConnMap map[string]*net.UDPConn, mu *sync.RWMutex, addr st
 
 // ForwarderOptions configures options for Forwarder.
 type ForwarderOptions struct {
+	Context           context.Context
 	ProxyProtocol     string
 	ProxyProtocolMode string
 	SocketMark        int
@@ -144,6 +164,20 @@ func Forwarder(
 	proxyProtocol string,
 	extra ...any,
 ) {
+	_ = ForwarderWithDone(dstAddr, readCh, sendCh, stopCh, bufSize, proxyProtocol, extra...)
+}
+
+// ForwarderWithDone is like Forwarder, but returns a channel that is closed
+// after the forwarder's reader and all per-flow writer goroutines have exited.
+func ForwarderWithDone(
+	dstAddr *net.UDPAddr,
+	readCh <-chan *msg.UDPPacket,
+	sendCh chan<- msg.Message,
+	stopCh <-chan struct{},
+	bufSize int,
+	proxyProtocol string,
+	extra ...any,
+) <-chan struct{} {
 	opts := ForwarderOptions{
 		ProxyProtocol: proxyProtocol,
 	}
@@ -162,7 +196,7 @@ func Forwarder(
 	if opts.ProxyProtocol == "" {
 		opts.ProxyProtocol = proxyProtocol
 	}
-	forwarderWithOptions(dstAddr, readCh, sendCh, stopCh, bufSize, opts, udpSocketIdleTimeout)
+	return forwarderWithOptions(dstAddr, readCh, sendCh, stopCh, bufSize, opts, udpSocketIdleTimeout)
 }
 
 // forwarderWithIdleTimeout is Forwarder with a configurable idle timeout, so
@@ -177,8 +211,8 @@ func forwarderWithIdleTimeout(
 	proxyProtocol string,
 	proxyProtocolMode string,
 	idleTimeout time.Duration,
-) {
-	forwarderWithOptions(dstAddr, readCh, sendCh, stopCh, bufSize, ForwarderOptions{
+) <-chan struct{} {
+	return forwarderWithOptions(dstAddr, readCh, sendCh, stopCh, bufSize, ForwarderOptions{
 		ProxyProtocol:     proxyProtocol,
 		ProxyProtocolMode: proxyProtocolMode,
 	}, idleTimeout)
@@ -192,12 +226,24 @@ func forwarderWithOptions(
 	bufSize int,
 	options ForwarderOptions,
 	idleTimeout time.Duration,
-) {
+) <-chan struct{} {
+	done := make(chan struct{})
 	var mu sync.RWMutex
 	udpConnMap := make(map[string]*net.UDPConn)
+	var writerWg sync.WaitGroup
+
+	closeAllConns := func() {
+		mu.Lock()
+		for _, conn := range udpConnMap {
+			_ = conn.Close()
+		}
+		clear(udpConnMap)
+		mu.Unlock()
+	}
 
 	// read from dstAddr and write to sendCh
 	writerFn := func(raddr *net.UDPAddr, udpConn *net.UDPConn) {
+		defer writerWg.Done()
 		addr := raddr.String()
 		defer func() {
 			removeUDPConn(udpConnMap, &mu, addr, udpConn)
@@ -212,7 +258,7 @@ func forwarderWithOptions(
 		// once would expire it even on a socket that keeps receiving packets.
 		deadline := netpkg.NewIdleReadDeadline(udpConn, idleTimeout)
 
-		// Wrap the read loop in a function that recovers from send-on-closed-channel panic.
+		// Wrap the write loop in a function that recovers from send-on-closed-channel panic.
 		func() {
 			defer func() {
 				_ = recover() // Ignore panic from send on closed channel; function returns
@@ -246,14 +292,32 @@ func forwarderWithOptions(
 
 	// read from readCh
 	go func() {
+		defer close(done)
+		defer writerWg.Wait()
+		defer closeAllConns()
+
 		for {
 			select {
 			case udpMsg, ok := <-readCh:
 				if !ok {
 					return
 				}
+				if udpMsg == nil {
+					continue
+				}
 				buf, err := GetContent(udpMsg)
 				if err != nil {
+					continue
+				}
+
+				if udpMsg.RemoteAddr == nil {
+					if options.OnError != nil {
+						if options.ProxyProtocol == "tproxy" {
+							options.OnError(errors.New("transparent proxy requires non-nil remote address"), nil, dstAddr)
+						} else {
+							options.OnError(errors.New("udp packet requires non-nil remote address"), nil, dstAddr)
+						}
+					}
 					continue
 				}
 
@@ -261,14 +325,34 @@ func forwarderWithOptions(
 				udpConn, ok := udpConnMap[udpMsg.RemoteAddr.String()]
 				mu.RUnlock()
 
-				// isNewFlow is true only when this packet creates the udp flow,
-				// that is when the socket for the user address did not exist yet.
-				isNewFlow := false
+				// Build the proxy protocol header before creating/registering a new flow
+				// so a header-construction failure does not leave a stale flow in udpConnMap.
+				// By default ("first-packet"), only the first packet of a new flow carries the header.
+				// In "per-packet" mode, every UDP datagram carries the header (required by HAProxy/NGINX).
+				shouldAddProxyProtocol := (options.ProxyProtocol == "v1" || options.ProxyProtocol == "v2") &&
+					(!ok || options.ProxyProtocolMode == "per-packet")
+
+				var ppBuf []byte
+				if shouldAddProxyProtocol {
+					var err error
+					ppBuf, err = netpkg.BuildProxyProtocolHeader(udpMsg.RemoteAddr, dstAddr, options.ProxyProtocol)
+					if err != nil {
+						if options.OnError != nil {
+							options.OnError(err, udpMsg.RemoteAddr, dstAddr)
+						}
+						continue
+					}
+				}
+
 				if !ok {
 					// Dial outside the lock to avoid blocking other readers/writers.
 					var err error
-					if options.ProxyProtocol == "tproxy" && udpMsg.RemoteAddr != nil {
-						udpConn, err = netpkg.DialUDPTransparent(udpMsg.RemoteAddr, dstAddr, options.SocketMark)
+					if options.ProxyProtocol == "tproxy" {
+						dialCtx := options.Context
+						if dialCtx == nil {
+							dialCtx = context.Background()
+						}
+						udpConn, err = netpkg.DialUDPTransparent(dialCtx, udpMsg.RemoteAddr, dstAddr, options.SocketMark)
 					} else {
 						udpConn, err = net.DialUDP("udp", nil, dstAddr)
 					}
@@ -279,6 +363,7 @@ func forwarderWithOptions(
 						continue
 					}
 
+					isNewFlow := false
 					mu.Lock()
 					// Double-check after acquiring write lock.
 					if existing, exists := udpConnMap[udpMsg.RemoteAddr.String()]; exists {
@@ -291,34 +376,32 @@ func forwarderWithOptions(
 					mu.Unlock()
 
 					if isNewFlow {
+						writerWg.Add(1)
 						go writerFn(udpMsg.RemoteAddr, udpConn)
 					}
 				}
 
-				// Add proxy protocol header if configured.
-				// By default ("first-packet"), only the first packet of a new flow carries the header.
-				// In "per-packet" mode, every UDP datagram carries the header (required by HAProxy/NGINX).
-				shouldAddProxyProtocol := (options.ProxyProtocol == "v1" || options.ProxyProtocol == "v2") &&
-					udpMsg.RemoteAddr != nil &&
-					(isNewFlow || options.ProxyProtocolMode == "per-packet")
-
+				var ppBufPtr *[]byte
+				var finalBuf []byte
 				if shouldAddProxyProtocol {
-					ppBuf, err := netpkg.BuildProxyProtocolHeader(udpMsg.RemoteAddr, dstAddr, options.ProxyProtocol)
-					if err == nil {
-						// Prepend proxy protocol header to the UDP payload
-						finalBuf := ppBufPool.Get().([]byte)
-						if cap(finalBuf) < len(ppBuf)+len(buf) {
-							finalBuf = make([]byte, len(ppBuf)+len(buf))
-						} else {
-							finalBuf = finalBuf[:len(ppBuf)+len(buf)]
-						}
-						copy(finalBuf, ppBuf)
-						copy(finalBuf[len(ppBuf):], buf)
-						buf = finalBuf
+					// Prepend proxy protocol header to the UDP payload
+					ppBufPtr = ppBufPool.Get().(*[]byte)
+					finalBuf = *ppBufPtr
+					if cap(finalBuf) < len(ppBuf)+len(buf) {
+						finalBuf = make([]byte, len(ppBuf)+len(buf))
+					} else {
+						finalBuf = finalBuf[:len(ppBuf)+len(buf)]
 					}
+					copy(finalBuf, ppBuf)
+					copy(finalBuf[len(ppBuf):], buf)
+					buf = finalBuf
 				}
 
 				_, err = udpConn.Write(buf)
+				if ppBufPtr != nil {
+					*ppBufPtr = finalBuf[:0]
+					ppBufPool.Put(ppBufPtr)
+				}
 				if err != nil {
 					udpConn.Close()
 					removeUDPConn(udpConnMap, &mu, udpMsg.RemoteAddr.String(), udpConn)
@@ -330,18 +413,17 @@ func forwarderWithOptions(
 					_ = udpConn.SetReadDeadline(time.Now().Add(idleTimeout))
 				}
 			case <-stopCh:
-				mu.Lock()
-				for _, conn := range udpConnMap {
-					_ = conn.Close()
-				}
-				clear(udpConnMap)
-				mu.Unlock()
 				return
 			}
 		}
 	}()
+
+	return done
 }
 
 var ppBufPool = sync.Pool{
-	New: func() any { return make([]byte, 0, 1024) },
+	New: func() any {
+		b := make([]byte, 0, 1024)
+		return &b
+	},
 }

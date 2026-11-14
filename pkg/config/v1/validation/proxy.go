@@ -17,6 +17,7 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -43,11 +44,17 @@ func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
 	if !slices.Contains([]string{"", "first-packet", "per-packet"}, c.Transport.ProxyProtocolMode) {
 		return fmt.Errorf("not support proxy protocol mode: %s, optional values are [first-packet, per-packet]", c.Transport.ProxyProtocolMode)
 	}
+	if c.Transport.ProxyProtocolMode != "" && c.Type != "udp" && c.Type != "sudp" {
+		return fmt.Errorf("transport.proxyProtocolMode is only supported for udp and sudp proxies")
+	}
 	if c.Transport.ProxyProtocolMode != "" && effectiveProxyProtocol != "v1" && effectiveProxyProtocol != "v2" {
 		return fmt.Errorf("transport.proxyProtocolMode requires transport.proxyProtocol to be set to v1 or v2")
 	}
 	if c.Transport.SocketMark < 0 {
 		return fmt.Errorf("transport.socketMark should be greater than or equal to 0")
+	}
+	if c.Transport.SocketMark > math.MaxInt32 {
+		return fmt.Errorf("transport.socketMark should be less than or equal to %d", math.MaxInt32)
 	}
 	if !slices.Contains([]string{"client", "server"}, c.Transport.BandwidthLimitMode) {
 		return fmt.Errorf("bandwidth limit mode should be client or server")

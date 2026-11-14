@@ -115,12 +115,18 @@ func TestNewClientTLSConfigVerification(t *testing.T) {
 	// xtcp visitors and plugins, regardless of the new transport option.
 	cfg, err := NewClientTLSConfig("", "", "", "example.com")
 	require.NoError(t, err)
+	require.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
 	require.True(t, cfg.InsecureSkipVerify)
 	require.Nil(t, cfg.RootCAs)
 	cfg, err = NewClientTLSConfig("", "", caFile, "example.com")
 	require.NoError(t, err)
+	require.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
 	require.False(t, cfg.InsecureSkipVerify)
 	require.True(t, cfg.RootCAs.Equal(filePool))
+
+	serverCfg, err := NewServerTLSConfig("", "", "")
+	require.NoError(t, err)
+	require.Equal(t, uint16(tls.VersionTLS12), serverCfg.MinVersion)
 }
 
 func TestNewClientTLSConfigCAErrors(t *testing.T) {

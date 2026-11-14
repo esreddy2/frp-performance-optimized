@@ -378,3 +378,17 @@ func TestKeyAgreementRejectsLowOrderPoint(t *testing.T) {
 	_, err = NewClientCryptoContext(clientPriv, clientHelloPayload, serverHelloPayload)
 	require.ErrorContains(t, err, "X25519 exchange")
 }
+
+func TestDeriveIKMBoundaryAndNil(t *testing.T) {
+	var nilCtx *CryptoContext
+	require.Nil(t, nilCtx.DeriveIKM(nil))
+	require.Equal(t, []byte("token"), nilCtx.DeriveIKM([]byte("token")))
+
+	c1 := &CryptoContext{SharedSecret: []byte("ab")}
+	c2 := &CryptoContext{SharedSecret: []byte("a")}
+	require.NotEqual(t, c1.DeriveIKM([]byte("c")), c2.DeriveIKM([]byte("bc")))
+
+	c3 := &CryptoContext{SharedSecret: []byte("token")}
+	c4 := &CryptoContext{}
+	require.NotEqual(t, c3.DeriveIKM(nil), c4.DeriveIKM([]byte("token")))
+}

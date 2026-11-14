@@ -157,6 +157,9 @@ type Service struct {
 
 	// Track in-flight QUIC connection handler goroutines.
 	quicConnsWG sync.WaitGroup
+
+	// Track the tcp muxer Serve goroutine so Close waits for it to exit.
+	muxerWG sync.WaitGroup
 }
 
 func NewService(cfg *v1.ServerConfig) (svr *Service, err error) {
@@ -259,14 +262,14 @@ func NewService(cfg *v1.ServerConfig) (svr *Service, err error) {
 
 	svr.muxer = mux.NewMux(ln)
 	svr.muxer.SetKeepAlive(time.Duration(cfg.Transport.TCPKeepAlive) * time.Second)
-	// Capture muxer by value so the Serve goroutine does not read through
-	// the svr named return, which is written (set to nil) on error returns.
+	// Capture muxer and svrRef by value so the Serve goroutine does not read
+	// through the svr named return, which is written (set to nil) on error returns.
 	muxer := svr.muxer
-	go func() {
+	svrRef.muxerWG.Go(func() {
 		if err := muxer.Serve(); err != nil {
 			log.Warnf("tcp muxer serve error: %v", err)
 		}
-	}()
+	})
 	ln = svr.muxer.DefaultListener()
 
 	svr.listener = ln
@@ -637,6 +640,7 @@ func (svr *Service) closeResources() {
 	svr.rc.Close()
 	if svr.muxer != nil {
 		svr.muxer.Close()
+		svr.muxerWG.Wait()
 	}
 	// Close the controls and wait, within a bounded budget, for their workers
 	// to publish the proxy teardown notifications. The plugin notification
@@ -1010,8 +1014,8 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 			defer func() {
 				if r := recover(); r != nil {
 					log.Errorf("handle connection panic: %v", r)
+					frpConn.Close()
 				}
-				frpConn.Close()
 			}()
 			if lo.FromPtr(svr.cfg.Transport.TCPMux) && !internal {
 				fmuxCfg := fmux.DefaultConfig()

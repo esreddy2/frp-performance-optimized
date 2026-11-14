@@ -2,15 +2,20 @@ package client
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
+
 	"github.com/fatedier/frp/client/configmgmt"
 	"github.com/fatedier/frp/pkg/config/source"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/policy/security"
+	httppkg "github.com/fatedier/frp/pkg/util/http"
 	"github.com/fatedier/frp/pkg/vnet"
 )
 
@@ -391,5 +396,268 @@ func TestServiceConfigManagerCreateStoreProxyDoesNotPersistRuntimeDefaults(t *te
 	}
 	if got.GetBaseConfig().Transport.BandwidthLimitMode != "" {
 		t.Fatalf("bandwidthLimitMode was persisted with runtime default: %q", got.GetBaseConfig().Transport.BandwidthLimitMode)
+	}
+}
+
+func TestServiceConfigManagerCRUDAndFileOps(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "frpc.toml")
+
+	storeSource, err := source.NewStoreSource(source.StoreSourceConfig{
+		Path: filepath.Join(tmpDir, "store.json"),
+	})
+	if err != nil {
+		t.Fatalf("new store source: %v", err)
+	}
+	agg := source.NewAggregator(source.NewConfigSource())
+	agg.SetStoreSource(storeSource)
+
+	common := &v1.ClientCommonConfig{User: "alice"}
+	_ = common.Complete()
+
+	svr := &Service{
+		aggregator:   agg,
+		configSource: agg.ConfigSource(),
+		storeSource:  storeSource,
+		common:       common,
+		reloadCommon: common,
+	}
+	mgr := newServiceConfigManager(svr)
+
+	// 1. ReadConfigFile / WriteConfigFile / ReloadFromFile without configFilePath
+	if _, err := mgr.ReadConfigFile(); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument when configFilePath is empty, got %v", err)
+	}
+	if err := mgr.ReloadFromFile(true); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on ReloadFromFile without path, got %v", err)
+	}
+	if err := mgr.WriteConfigFile(nil); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on empty WriteConfigFile, got %v", err)
+	}
+
+	svr.configFilePath = cfgPath
+	if _, err := mgr.ReadConfigFile(); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on missing config file, got %v", err)
+	}
+	if err := mgr.WriteConfigFile([]byte("serverAddr = \"127.0.0.1\"\n")); err != nil {
+		t.Fatalf("WriteConfigFile: %v", err)
+	}
+	gotContent, err := mgr.ReadConfigFile()
+	if err != nil || gotContent != "serverAddr = \"127.0.0.1\"\n" {
+		t.Fatalf("unexpected ReadConfigFile result: %q, err=%v", gotContent, err)
+	}
+
+	// 2. StoreEnabled and Proxy CRUD
+	if !mgr.StoreEnabled() {
+		t.Fatal("expected StoreEnabled to be true")
+	}
+	if mgr.IsStoreProxyEnabled("") || mgr.IsStoreProxyEnabled("nonexistent") {
+		t.Fatal("expected IsStoreProxyEnabled to be false for empty or nonexistent proxy")
+	}
+
+	if _, err := mgr.CreateStoreProxy(nil); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for nil proxy, got %v", err)
+	}
+
+	p1 := newTestRawTCPProxyConfig("p1")
+	if _, err := mgr.CreateStoreProxy(p1); err != nil {
+		t.Fatalf("CreateStoreProxy: %v", err)
+	}
+	if !mgr.IsStoreProxyEnabled("p1") {
+		t.Fatal("expected p1 to be enabled in store by default")
+	}
+
+	proxies, err := mgr.ListStoreProxies()
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("ListStoreProxies: len=%d, err=%v", len(proxies), err)
+	}
+
+	if _, err := mgr.GetStoreProxy(""); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for empty name, got %v", err)
+	}
+	if _, err := mgr.GetStoreProxy("missing"); !errors.Is(err, configmgmt.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing proxy, got %v", err)
+	}
+	if got, err := mgr.GetStoreProxy("p1"); err != nil || got.GetBaseConfig().Name != "p1" {
+		t.Fatalf("GetStoreProxy(p1): %v, %v", got, err)
+	}
+	if got, ok := mgr.GetProxyConfig("p1"); !ok || got.GetBaseConfig().Name != "p1" {
+		t.Fatalf("GetProxyConfig(p1): ok=%v", ok)
+	}
+	if _, ok := mgr.GetProxyConfig("missing"); ok {
+		t.Fatal("expected GetProxyConfig(missing) to return false")
+	}
+
+	// UpdateStoreProxy error cases and success
+	if _, err := mgr.UpdateStoreProxy("", p1); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on empty name: %v", err)
+	}
+	if _, err := mgr.UpdateStoreProxy("p1", nil); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on nil cfg: %v", err)
+	}
+	if _, err := mgr.UpdateStoreProxy("other", p1); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on name mismatch: %v", err)
+	}
+	missingPxy := newTestRawTCPProxyConfig("missing")
+	if _, err := mgr.UpdateStoreProxy("missing", missingPxy); !errors.Is(err, configmgmt.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound on updating missing proxy: %v", err)
+	}
+
+	disabled := false
+	p1.Enabled = &disabled
+	p1.LocalPort = 10081
+	if _, err := mgr.UpdateStoreProxy("p1", p1); err != nil {
+		t.Fatalf("UpdateStoreProxy(p1): %v", err)
+	}
+	if mgr.IsStoreProxyEnabled("p1") {
+		t.Fatal("expected IsStoreProxyEnabled(p1) to be false after disabling")
+	}
+
+	// DeleteStoreProxy error cases and success
+	if err := mgr.DeleteStoreProxy(""); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on empty delete name: %v", err)
+	}
+	if err := mgr.DeleteStoreProxy("missing"); !errors.Is(err, configmgmt.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound on deleting missing proxy: %v", err)
+	}
+	if err := mgr.DeleteStoreProxy("p1"); err != nil {
+		t.Fatalf("DeleteStoreProxy(p1): %v", err)
+	}
+
+	// 3. Visitor CRUD
+	if _, err := mgr.CreateStoreVisitor(nil); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for nil visitor: %v", err)
+	}
+	vcfg := &v1.STCPVisitorConfig{
+		VisitorBaseConfig: v1.VisitorBaseConfig{
+			Name:       "v1",
+			Type:       "stcp",
+			ServerName: "srv1",
+			SecretKey:  "sec",
+			BindPort:   9001,
+		},
+	}
+	if _, err := mgr.CreateStoreVisitor(vcfg); err != nil {
+		t.Fatalf("CreateStoreVisitor: %v", err)
+	}
+	if _, err := mgr.CreateStoreVisitor(vcfg); !errors.Is(err, configmgmt.ErrConflict) {
+		t.Fatalf("expected ErrConflict on duplicate visitor: %v", err)
+	}
+
+	visitors, err := mgr.ListStoreVisitors()
+	if err != nil || len(visitors) != 1 {
+		t.Fatalf("ListStoreVisitors: len=%d, err=%v", len(visitors), err)
+	}
+	if _, err := mgr.GetStoreVisitor(""); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for empty visitor name: %v", err)
+	}
+	if _, err := mgr.GetStoreVisitor("missing"); !errors.Is(err, configmgmt.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing visitor: %v", err)
+	}
+	if got, err := mgr.GetStoreVisitor("v1"); err != nil || got.GetBaseConfig().Name != "v1" {
+		t.Fatalf("GetStoreVisitor(v1): %v, %v", got, err)
+	}
+	if got, ok := mgr.GetVisitorConfig("v1"); !ok || got.GetBaseConfig().Name != "v1" {
+		t.Fatalf("GetVisitorConfig(v1): ok=%v", ok)
+	}
+	if _, ok := mgr.GetVisitorConfig("missing"); ok {
+		t.Fatal("expected GetVisitorConfig(missing) to return false")
+	}
+
+	// UpdateStoreVisitor error cases and success
+	if _, err := mgr.UpdateStoreVisitor("", vcfg); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on empty visitor name: %v", err)
+	}
+	if _, err := mgr.UpdateStoreVisitor("v1", nil); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on nil visitor cfg: %v", err)
+	}
+	if _, err := mgr.UpdateStoreVisitor("other", vcfg); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on visitor name mismatch: %v", err)
+	}
+	missingVisitor := &v1.STCPVisitorConfig{
+		VisitorBaseConfig: v1.VisitorBaseConfig{
+			Name:       "missing",
+			Type:       "stcp",
+			ServerName: "srv1",
+			BindPort:   9002,
+		},
+	}
+	if _, err := mgr.UpdateStoreVisitor("missing", missingVisitor); !errors.Is(err, configmgmt.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound on updating missing visitor: %v", err)
+	}
+	vcfg.BindPort = 9003
+	if _, err := mgr.UpdateStoreVisitor("v1", vcfg); err != nil {
+		t.Fatalf("UpdateStoreVisitor(v1): %v", err)
+	}
+
+	// DeleteStoreVisitor error cases and success
+	if err := mgr.DeleteStoreVisitor(""); !errors.Is(err, configmgmt.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument on empty delete visitor name: %v", err)
+	}
+	if err := mgr.DeleteStoreVisitor("missing"); !errors.Is(err, configmgmt.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound on deleting missing visitor: %v", err)
+	}
+	if err := mgr.DeleteStoreVisitor("v1"); err != nil {
+		t.Fatalf("DeleteStoreVisitor(v1): %v", err)
+	}
+}
+
+func TestAPIRouterRegistration(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "frpc.toml")
+	if err := os.WriteFile(cfgPath, []byte("serverAddr = \"127.0.0.1\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	storeSource, err := source.NewStoreSource(source.StoreSourceConfig{
+		Path: filepath.Join(tmpDir, "store.json"),
+	})
+	if err != nil {
+		t.Fatalf("new store source: %v", err)
+	}
+	agg := source.NewAggregator(source.NewConfigSource())
+	agg.SetStoreSource(storeSource)
+
+	common := &v1.ClientCommonConfig{ServerAddr: "127.0.0.1"}
+	_ = common.Complete()
+
+	svr := &Service{
+		aggregator:     agg,
+		configSource:   agg.ConfigSource(),
+		storeSource:    storeSource,
+		common:         common,
+		reloadCommon:   common,
+		configFilePath: cfgPath,
+	}
+
+	router := mux.NewRouter()
+	helper := &httppkg.RouterRegisterHelper{
+		Router:         router,
+		AssetsFS:       http.Dir(tmpDir),
+		AuthMiddleware: func(next http.Handler) http.Handler { return next },
+	}
+	svr.registerRouteHandlers(helper)
+
+	// /healthz
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /healthz, got %d", rec.Code)
+	}
+
+	// / redirects to /static/
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("expected 301 on /, got %d", rec.Code)
+	}
+
+	// /api/status and /api/config
+	for _, path := range []string{"/api/status", "/api/config", "/api/store/proxies", "/api/store/visitors"} {
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 on %s, got %d (%s)", path, rec.Code, rec.Body.String())
+		}
 	}
 }

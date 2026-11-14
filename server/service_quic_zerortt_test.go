@@ -89,11 +89,14 @@ func TestQUICListenerDoesNotAllow0RTT(t *testing.T) {
 		require.False(t, state.Used0RTT, "the client must not use 0-RTT on connection %d", i)
 		require.False(t, state.TLS.DidResume, "the server must not issue a session ticket, connection %d", i)
 
-		// The server sends its session ticket right after the handshake. Keep
-		// the connection open long enough for the client to receive it, so
-		// that a server which issues tickets is caught on the next
-		// connection.
-		time.Sleep(300 * time.Millisecond)
+		// Wait for the server's HANDSHAKE_DONE frame so any post-handshake
+		// TLS frames (such as NewSessionTicket, if a server mistakenly issued
+		// one) are processed before closing the connection.
+		select {
+		case <-conn.HandshakeComplete():
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timeout waiting for handshake completion on connection %d", i)
+		}
 		require.NoError(t, conn.CloseWithError(0, ""))
 	}
 }

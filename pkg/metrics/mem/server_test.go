@@ -151,3 +151,48 @@ func (m *serverMetrics) hasProxyStatistics(name string) bool {
 	_, ok := m.info.ProxyStatistics[name]
 	return ok
 }
+
+func TestServerMetricsAllOperationsAndQueries(t *testing.T) {
+	require := require.New(t)
+
+	m := newServerMetricsWithClock(nil)
+
+	m.NewClient()
+	m.NewClient()
+	m.CloseClient()
+
+	m.NewProxy("ssh", "tcp", "alice", "cid-1")
+	m.NewProxy("dns", "udp", "bob", "cid-2")
+	m.OpenConnection("ssh", "tcp")
+	m.OpenConnection("ssh", "tcp")
+	m.CloseConnection("ssh", "tcp")
+	m.AddTrafficIn("ssh", "tcp", 1024)
+	m.AddTrafficOut("ssh", "tcp", 2048)
+
+	srvStats := m.GetServer()
+	require.Equal(int64(1), srvStats.ClientCounts)
+	require.Equal(int64(1), srvStats.CurConns)
+	require.Equal(int64(1024), srvStats.TotalTrafficIn)
+	require.Equal(int64(2048), srvStats.TotalTrafficOut)
+	require.Equal(int64(1), srvStats.ProxyTypeCounts["tcp"])
+	require.Equal(int64(1), srvStats.ProxyTypeCounts["udp"])
+
+	tcpProxies := m.GetProxiesByType("tcp")
+	require.Len(tcpProxies, 1)
+	require.Equal("ssh", tcpProxies[0].Name)
+	require.Equal("alice", tcpProxies[0].User)
+	require.Equal("cid-1", tcpProxies[0].ClientID)
+	require.Equal(int64(1), tcpProxies[0].CurConns)
+
+	byTypeAndName := m.GetProxiesByTypeAndName("tcp", "ssh")
+	require.NotNil(byTypeAndName)
+	require.Equal("ssh", byTypeAndName.Name)
+	require.Nil(m.GetProxiesByTypeAndName("udp", "ssh"))
+
+	traffic := m.GetProxyTraffic("ssh")
+	require.NotNil(traffic)
+	require.Equal("ssh", traffic.Name)
+	require.Len(traffic.TrafficIn, ReserveDays)
+	require.Len(traffic.TrafficOut, ReserveDays)
+	require.Nil(m.GetProxyTraffic("nonexistent"))
+}

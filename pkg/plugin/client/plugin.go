@@ -21,7 +21,6 @@ import (
 	"net"
 	"sync"
 
-	"github.com/fatedier/golib/errors"
 	pp "github.com/pires/go-proxyproto"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
@@ -91,10 +90,16 @@ func (l *Listener) Accept() (net.Conn, error) {
 }
 
 func (l *Listener) PutConn(conn net.Conn) error {
-	err := errors.PanicToError(func() {
-		l.conns <- conn
-	})
-	return err
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return fmt.Errorf("listener closed")
+	}
+	l.conns <- conn
+	return nil
 }
 
 func (l *Listener) Close() error {

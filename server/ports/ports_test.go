@@ -70,3 +70,89 @@ func freeTCPPort(t *testing.T) int {
 
 	return listener.Addr().(*net.TCPAddr).Port
 }
+
+func TestManagerReservedPortDoesNotStealAllocatedPort(t *testing.T) {
+	require := require.New(t)
+
+	p1 := freeTCPPort(t)
+	p2 := freeTCPPort(t)
+	if p1 == p2 {
+		p2 = freeTCPPort(t)
+	}
+	pm := NewManager("tcp", "127.0.0.1", []types.PortsRange{{Single: p1}, {Single: p2}})
+	defer pm.Close()
+
+	// proxy-a acquires p1 and then releases it (p1 becomes reserved for proxy-a)
+	got1, err := pm.Acquire("proxy-a", p1)
+	require.NoError(err)
+	require.Equal(p1, got1)
+	pm.Release(p1)
+
+	// proxy-b explicitly acquires p1 before binding OS socket
+	gotB, err := pm.Acquire("proxy-b", p1)
+	require.NoError(err)
+	require.Equal(p1, gotB)
+
+	// proxy-a now requests a dynamic port (0): must NOT steal p1 from proxy-b, must get p2
+	gotA, err := pm.Acquire("proxy-a", 0)
+	require.NoError(err)
+	require.Equal(p2, gotA)
+	require.Equal("proxy-b", pm.usedPorts[p1].ProxyName)
+	require.Equal("proxy-a", pm.usedPorts[p2].ProxyName)
+
+	// Once both are released, proxy-a requesting 0 reuses its newly reserved port p2
+	pm.Release(p1)
+	pm.Release(p2)
+	reused, err := pm.Acquire("proxy-a", 0)
+	require.NoError(err)
+	require.Equal(p2, reused)
+}
+
+func TestManagerAcquireErrorsAndUDPSupport(t *testing.T) {
+	require := require.New(t)
+
+	p1 := freeTCPPort(t)
+	disallowedPort := freeTCPPort(t)
+	if disallowedPort == p1 {
+		disallowedPort++
+	}
+
+	// Test range configuration and nil clock fallback
+	pm := newManagerWithClock("tcp", "127.0.0.1", []types.PortsRange{{Start: p1, End: p1}}, nil)
+	defer pm.Close()
+	pm.Close() // idempotent Close
+
+	// 1. ErrPortNotAllowed when requesting port outside allowed range
+	_, err := pm.Acquire("p-not-allowed", disallowedPort)
+	require.ErrorIs(err, ErrPortNotAllowed)
+
+	// 2. ErrPortUnAvailable when OS socket is already bound on p1
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", "0"))
+	require.NoError(err)
+	busyPort := ln.Addr().(*net.TCPAddr).Port
+	defer ln.Close()
+
+	pmBusy := NewManager("tcp", "127.0.0.1", []types.PortsRange{{Single: busyPort}})
+	defer pmBusy.Close()
+	_, err = pmBusy.Acquire("p-busy", busyPort)
+	require.ErrorIs(err, ErrPortUnAvailable)
+	_, err = pmBusy.Acquire("p-busy-random", 0)
+	require.ErrorIs(err, ErrNoAvailablePort)
+
+	// 3. ErrPortAlreadyUsed when port is already acquired by another proxy
+	got, err := pm.Acquire("p1", p1)
+	require.NoError(err)
+	require.Equal(p1, got)
+	_, err = pm.Acquire("p2", p1)
+	require.ErrorIs(err, ErrPortAlreadyUsed)
+	_, err = pm.Acquire("p3", 0)
+	require.ErrorIs(err, ErrNoAvailablePort)
+
+	// 4. UDP Manager acquire and release
+	udpPM := NewManager("udp", "127.0.0.1", []types.PortsRange{{Single: p1}})
+	defer udpPM.Close()
+	udpPort, err := udpPM.Acquire("udp-p1", p1)
+	require.NoError(err)
+	require.Equal(p1, udpPort)
+	udpPM.Release(udpPort)
+}

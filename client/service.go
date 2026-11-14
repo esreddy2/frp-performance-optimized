@@ -630,10 +630,16 @@ func (svr *Service) updateConfigSourceLocked(
 	return nil
 }
 
+// Close initiates an immediate service shutdown. See GracefulClose for the
+// synchronous vs. asynchronous contract.
 func (svr *Service) Close() {
 	svr.GracefulClose(time.Duration(0))
 }
 
+// GracefulClose initiates service shutdown with a graceful control drain
+// duration d. Once Run has claimed startup, GracefulClose cancels the service
+// context and returns asynchronously while Run performs stop() cleanup; before
+// Run starts, GracefulClose performs stop() synchronously.
 func (svr *Service) GracefulClose(d time.Duration) {
 	svr.gracefulShutdownDuration.Store(int64(d))
 	svr.lifecycleMu.Lock()

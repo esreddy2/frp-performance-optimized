@@ -51,6 +51,12 @@ func validateVisitorBaseConfig(c *v1.VisitorBaseConfig) error {
 	if c.BindPort == 0 {
 		return errors.New("bind port is required")
 	}
+
+	if c.Plugin.VisitorPluginOptions != nil {
+		if err := ValidateVisitorPluginOptions(c.Plugin.VisitorPluginOptions); err != nil {
+			return fmt.Errorf("plugin %s: %v", c.Plugin.Type, err)
+		}
+	}
 	return nil
 }
 

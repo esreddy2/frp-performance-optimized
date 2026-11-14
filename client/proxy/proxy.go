@@ -136,6 +136,13 @@ func (pxy *BaseProxy) GetName() string {
 
 func (pxy *BaseProxy) Run() error {
 	if pxy.baseCfg.Plugin.Type != "" {
+		if pxy.baseCfg.Transport.ProxyProtocol == "tproxy" {
+			pxy.xl.Warnf(
+				"transparent proxy (tproxy) is incompatible with plugin [%s]; "+
+					"connections will be handled by plugin without transparent dial",
+				pxy.baseCfg.Plugin.Type,
+			)
+		}
 		p, err := plugin.Create(pxy.baseCfg.Plugin.Type, plugin.PluginContext{
 			Name:           pxy.baseCfg.Name,
 			VnetController: pxy.vnetController,
@@ -143,17 +150,26 @@ func (pxy *BaseProxy) Run() error {
 		if err != nil {
 			return err
 		}
+		pxy.mu.Lock()
 		pxy.proxyPlugin = p
+		pxy.mu.Unlock()
 	}
 	return nil
 }
 
-// getPlugin is accessed while the owning Wrapper holds its lifecycle lock.
-func (pxy *BaseProxy) getPlugin() plugin.Plugin { return pxy.proxyPlugin }
+func (pxy *BaseProxy) getPlugin() plugin.Plugin {
+	pxy.mu.RLock()
+	defer pxy.mu.RUnlock()
+	return pxy.proxyPlugin
+}
 
 func (pxy *BaseProxy) Close() {
-	if pxy.proxyPlugin != nil {
-		pxy.proxyPlugin.Close()
+	pxy.mu.Lock()
+	p := pxy.proxyPlugin
+	pxy.proxyPlugin = nil
+	pxy.mu.Unlock()
+	if p != nil {
+		p.Close()
 	}
 }
 
@@ -185,12 +201,17 @@ func (pxy *BaseProxy) wrapWorkConn(conn net.Conn, encKey []byte) (io.ReadWriteCl
 }
 
 func (pxy *BaseProxy) SetInWorkConnCallback(cb func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) bool) {
+	pxy.mu.Lock()
 	pxy.inWorkConnCallback = cb
+	pxy.mu.Unlock()
 }
 
 func (pxy *BaseProxy) InWorkConn(conn net.Conn, m *msg.StartWorkConn) {
-	if pxy.inWorkConnCallback != nil {
-		if !pxy.inWorkConnCallback(pxy.baseCfg, conn, m) {
+	pxy.mu.RLock()
+	cb := pxy.inWorkConnCallback
+	pxy.mu.RUnlock()
+	if cb != nil {
+		if !cb(pxy.baseCfg, conn, m) {
 			return
 		}
 	}
@@ -206,7 +227,7 @@ func (pxy *BaseProxy) HandleTCPWorkConnection(workConn net.Conn, m *msg.StartWor
 		baseCfg.Transport.UseEncryption, baseCfg.Transport.UseCompression)
 
 	var srcAddr, dstAddr *net.TCPAddr
-	if m.SrcAddr != "" && m.SrcPort != 0 {
+	if m.SrcAddr != "" {
 		if m.DstAddr == "" {
 			m.DstAddr = "127.0.0.1"
 		}
@@ -233,25 +254,31 @@ func (pxy *BaseProxy) HandleTCPWorkConnection(workConn net.Conn, m *msg.StartWor
 
 	// check if we need to send proxy protocol info
 	var connInfo plugin.ConnectionInfo
-	if m.SrcAddr != "" && m.SrcPort != 0 {
+	if srcAddr != nil {
 		connInfo.SrcAddr = srcAddr
 		connInfo.DstAddr = dstAddr
 	}
 
 	isTProxy := baseCfg.Transport.ProxyProtocol == "tproxy"
-	if !isTProxy && baseCfg.Transport.ProxyProtocol != "" && m.SrcAddr != "" && m.SrcPort != 0 {
+	if !isTProxy && baseCfg.Transport.ProxyProtocol != "" && srcAddr != nil {
 		header := netpkg.BuildProxyProtocolHeaderStruct(connInfo.SrcAddr, connInfo.DstAddr, baseCfg.Transport.ProxyProtocol)
 		connInfo.ProxyProtocolHeader = header
 	}
 	connInfo.Conn = remote
 	connInfo.UnderlyingConn = workConn
 
-	if pxy.proxyPlugin != nil {
+	pxy.mu.RLock()
+	p := pxy.proxyPlugin
+	pxy.mu.RUnlock()
+	if p != nil {
+		if isTProxy {
+			xl.Warnf("transparent proxy (tproxy) is not supported with plugin [%s]; handling via plugin without transparent dial", p.Name())
+		}
 		// if plugin is set, let plugin handle connection first
 		// Don't recycle compression resources here because plugins may
 		// retain the connection after Handle returns.
-		xl.Debugf("handle by plugin: %s", pxy.proxyPlugin.Name())
-		pxy.proxyPlugin.Handle(pxy.ctx, &connInfo)
+		xl.Debugf("handle by plugin: %s", p.Name())
+		p.Handle(pxy.ctx, &connInfo)
 		xl.Debugf("handle by plugin finished")
 		return
 	}
@@ -262,6 +289,11 @@ func (pxy *BaseProxy) HandleTCPWorkConnection(workConn net.Conn, m *msg.StartWor
 
 	var localConn net.Conn
 	if isTProxy {
+		if srcAddr == nil {
+			_ = workConn.Close()
+			xl.Warnf("transparent proxy requires client source address, dropping connection")
+			return
+		}
 		dstTCPAddr, resolveErr := net.ResolveTCPAddr("tcp", net.JoinHostPort(baseCfg.LocalIP, strconv.Itoa(baseCfg.LocalPort)))
 		if resolveErr != nil {
 			workConn.Close()
@@ -286,7 +318,7 @@ func (pxy *BaseProxy) HandleTCPWorkConnection(workConn net.Conn, m *msg.StartWor
 		if isTProxy {
 			if errors.Is(err, syscall.EPERM) {
 				xl.Errorf("transparent connect to local service [%s:%d] failed with EPERM: "+
-					"process lacks CAP_NET_ADMIN (run 'sudo setcap cap_net_admin,cap_net_raw+ep $(which frpc)')",
+					"process lacks CAP_NET_ADMIN (run 'sudo setcap cap_net_admin+ep $(which frpc)')",
 					baseCfg.LocalIP, baseCfg.LocalPort)
 			} else if errors.Is(err, syscall.EADDRNOTAVAIL) {
 				xl.Errorf("transparent connect to local service [%s:%d] failed with EADDRNOTAVAIL: "+

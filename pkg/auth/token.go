@@ -24,19 +24,45 @@ import (
 	"github.com/fatedier/frp/pkg/util/util"
 )
 
+const defaultAuthTimeout = 15 * time.Minute
+
 type TokenAuthSetterVerifier struct {
 	additionalAuthScopes []v1.AuthScope
 	token                string
+	now                  func() time.Time
 }
 
 func NewTokenAuth(additionalAuthScopes []v1.AuthScope, token string) *TokenAuthSetterVerifier {
 	return &TokenAuthSetterVerifier{
 		additionalAuthScopes: additionalAuthScopes,
 		token:                token,
+		now:                  time.Now,
 	}
 }
 
+func (auth *TokenAuthSetterVerifier) currentTime() time.Time {
+	if auth.now != nil {
+		return auth.now()
+	}
+	return time.Now()
+}
+
+func (auth *TokenAuthSetterVerifier) verifyTimestamp(timestamp int64) error {
+	now := auth.currentTime().Unix()
+	maxSkew := int64(defaultAuthTimeout.Seconds())
+	if timestamp <= 0 || timestamp < now-maxSkew || timestamp > now+maxSkew {
+		return fmt.Errorf("authentication timestamp expired or out of window")
+	}
+	return nil
+}
+
 func (auth *TokenAuthSetterVerifier) SetLogin(loginMsg *msg.Login) error {
+	if loginMsg == nil {
+		return fmt.Errorf("login message is nil")
+	}
+	if loginMsg.Timestamp == 0 {
+		loginMsg.Timestamp = auth.currentTime().Unix()
+	}
 	loginMsg.PrivilegeKey = util.GetAuthKey(auth.token, loginMsg.Timestamp)
 	return nil
 }
@@ -45,8 +71,11 @@ func (auth *TokenAuthSetterVerifier) SetPing(pingMsg *msg.Ping) error {
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeHeartBeats) {
 		return nil
 	}
+	if pingMsg == nil {
+		return fmt.Errorf("ping message is nil")
+	}
 
-	pingMsg.Timestamp = time.Now().Unix()
+	pingMsg.Timestamp = auth.currentTime().Unix()
 	pingMsg.PrivilegeKey = util.GetAuthKey(auth.token, pingMsg.Timestamp)
 	return nil
 }
@@ -55,15 +84,24 @@ func (auth *TokenAuthSetterVerifier) SetNewWorkConn(newWorkConnMsg *msg.NewWorkC
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeNewWorkConns) {
 		return nil
 	}
+	if newWorkConnMsg == nil {
+		return fmt.Errorf("newWorkConn message is nil")
+	}
 
-	newWorkConnMsg.Timestamp = time.Now().Unix()
+	newWorkConnMsg.Timestamp = auth.currentTime().Unix()
 	newWorkConnMsg.PrivilegeKey = util.GetAuthKey(auth.token, newWorkConnMsg.Timestamp)
 	return nil
 }
 
 func (auth *TokenAuthSetterVerifier) VerifyLogin(m *msg.Login) error {
+	if m == nil {
+		return fmt.Errorf("login message is nil")
+	}
 	if !util.ConstantTimeEqString(util.GetAuthKey(auth.token, m.Timestamp), m.PrivilegeKey) {
 		return fmt.Errorf("token in login doesn't match token from configuration")
+	}
+	if err := auth.verifyTimestamp(m.Timestamp); err != nil {
+		return err
 	}
 	return nil
 }
@@ -72,9 +110,15 @@ func (auth *TokenAuthSetterVerifier) VerifyPing(m *msg.Ping) error {
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeHeartBeats) {
 		return nil
 	}
+	if m == nil {
+		return fmt.Errorf("ping message is nil")
+	}
 
 	if !util.ConstantTimeEqString(util.GetAuthKey(auth.token, m.Timestamp), m.PrivilegeKey) {
 		return fmt.Errorf("token in heartbeat doesn't match token from configuration")
+	}
+	if err := auth.verifyTimestamp(m.Timestamp); err != nil {
+		return err
 	}
 	return nil
 }
@@ -83,9 +127,15 @@ func (auth *TokenAuthSetterVerifier) VerifyNewWorkConn(m *msg.NewWorkConn) error
 	if !slices.Contains(auth.additionalAuthScopes, v1.AuthScopeNewWorkConns) {
 		return nil
 	}
+	if m == nil {
+		return fmt.Errorf("newWorkConn message is nil")
+	}
 
 	if !util.ConstantTimeEqString(util.GetAuthKey(auth.token, m.Timestamp), m.PrivilegeKey) {
 		return fmt.Errorf("token in NewWorkConn doesn't match token from configuration")
+	}
+	if err := auth.verifyTimestamp(m.Timestamp); err != nil {
+		return err
 	}
 	return nil
 }

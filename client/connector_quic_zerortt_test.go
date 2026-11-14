@@ -17,6 +17,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -104,17 +105,28 @@ func TestQUICConnectorDoesNotUse0RTT(t *testing.T) {
 		require.False(t, state.Used0RTT, "the client must not use 0-RTT on connection %d", i)
 		require.False(t, state.TLS.DidResume, "the client must not resume a TLS session on connection %d", i)
 
+		var serverConn *quic.Conn
 		select {
-		case serverConn := <-accepted:
+		case serverConn = <-accepted:
 			require.False(t, serverConn.ConnectionState().Used0RTT, "the server must not see 0-RTT on connection %d", i)
 		case <-time.After(10 * time.Second):
 			t.Fatalf("timeout waiting for the server to accept connection %d", i)
 		}
-		// The server sends its session ticket right after the handshake. Keep
-		// the connection open long enough for the client to receive it, so
-		// that a client which keeps a session cache could use it on the next
-		// connection.
-		time.Sleep(300 * time.Millisecond)
+		// Perform a deterministic stream round-trip so the server's
+		// post-handshake frames (such as NewSessionTicket) are flushed and
+		// processed by the client before closing the connection.
+		rtCtx, rtCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		serverStream, err := serverConn.OpenStreamSync(rtCtx)
+		require.NoError(t, err)
+		_, err = serverStream.Write([]byte("ok"))
+		require.NoError(t, err)
+		require.NoError(t, serverStream.Close())
+
+		clientStream, err := impl.quicConn.AcceptStream(rtCtx)
+		require.NoError(t, err)
+		_, err = io.ReadAll(clientStream)
+		require.NoError(t, err)
+		rtCancel()
 		require.NoError(t, impl.quicConn.CloseWithError(0, ""))
 	}
 }

@@ -95,6 +95,7 @@ func (s *TunnelServer) Run() error {
 	}
 
 	s.sshConn = sshConn
+	defer s.closeSession()
 
 	addr, extraPayload, err := s.waitForwardAddrAndExtraPayload(channels, requests, 3*time.Second)
 	if err != nil {
@@ -174,10 +175,7 @@ func (s *TunnelServer) Run() error {
 
 		// If vc.Run returns, it means that the virtual client has been closed, and the ssh tunnel connection should be closed.
 		// One scenario is that the virtual client exits due to login failure.
-		s.closeDoneChOnce.Do(func() {
-			_ = sshConn.Close()
-			close(s.doneCh)
-		})
+		s.closeSession()
 	}()
 
 	s.vc.UpdateProxyConfigurer([]v1.ProxyConfigurer{pc})
@@ -193,11 +191,22 @@ func (s *TunnelServer) Run() error {
 
 	s.vc.Close()
 	log.Tracef("ssh tunnel connection from %v closed", sshConn.RemoteAddr())
+	s.closeSession()
+	return nil
+}
+
+func (s *TunnelServer) closeSession() {
 	s.closeDoneChOnce.Do(func() {
-		_ = sshConn.Close()
+		s.firstChannelMu.Lock()
+		if s.firstChannel != nil {
+			_ = s.firstChannel.Close()
+		}
+		s.firstChannelMu.Unlock()
+		if s.sshConn != nil {
+			_ = s.sshConn.Close()
+		}
 		close(s.doneCh)
 	})
-	return nil
 }
 
 func (s *TunnelServer) writeToClient(data string) {

@@ -3,6 +3,7 @@ package basic
 import (
 	"crypto/tls"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -304,10 +305,17 @@ var _ = ginkgo.Describe("[Feature: Basic]", func() {
 				case "xtcp":
 					localPortName = framework.TCPEchoServerPort
 					protocol = "tcp"
-					// xtcp depends on an external STUN server whose
-					// availability is not under our control, so this
-					// scenario is skipped in CI.
-					ginkgo.Skip("xtcp requires an external STUN server that is not stable in CI")
+					// xtcp depends on a reachable STUN server for NAT traversal;
+					// external public STUN servers are unreliable in CI, so gate
+					// execution on an explicit FRP_E2E_STUN_SERVER override.
+					stunServer := os.Getenv("FRP_E2E_STUN_SERVER")
+					if stunServer == "" {
+						ginkgo.Skip("xtcp requires a reachable STUN server; set FRP_E2E_STUN_SERVER=<host:port> to enable this test")
+					}
+					stunConf := fmt.Sprintf("\nnat_hole_stun_server = %s", stunServer)
+					clientServerConf.WriteString(stunConf)
+					clientVisitorConf.WriteString(stunConf)
+					clientUser2VisitorConf.WriteString(stunConf)
 				}
 
 				correctSK := "abc"

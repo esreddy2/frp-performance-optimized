@@ -160,10 +160,12 @@ type ReqWorkConn struct{}
 type StartWorkConn struct {
 	ProxyName string `json:"proxy_name,omitempty"`
 	SrcAddr   string `json:"src_addr,omitempty"`
-	DstAddr   string `json:"dst_addr,omitempty"`
-	SrcPort   uint16 `json:"src_port,omitempty"`
-	DstPort   uint16 `json:"dst_port,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// DstAddr and DstPort carry the frps-facing destination address and port
+	// observed by the server listener (used for PROXY protocol headers).
+	DstAddr string `json:"dst_addr,omitempty"`
+	SrcPort uint16 `json:"src_port,omitempty"`
+	DstPort uint16 `json:"dst_port,omitempty"`
+	Error   string `json:"error,omitempty"`
 
 	// udp only: server confirms QUIC datagram relay is active for this
 	// proxy. Absent/false from servers without support -> stream mode.

@@ -36,7 +36,10 @@ func OpenTun(ctx context.Context, addr string) (TunDevice, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newTunDeviceWrapper(td), nil
+}
 
+func newTunDeviceWrapper(td tun.Device) *tunDeviceWrapper {
 	mtu, err := td.MTU()
 	if err != nil {
 		mtu = defaultPacketSize
@@ -56,7 +59,7 @@ func OpenTun(ctx context.Context, addr string) (TunDevice, error) {
 		device.readBuffers[i] = make([]byte, offset+bufferSize)
 	}
 
-	return device, nil
+	return device
 }
 
 type tunDeviceWrapper struct {
@@ -87,6 +90,9 @@ func (d *tunDeviceWrapper) Read(p []byte) (int, error) {
 			continue
 		}
 		d.packetBuffers = append(d.packetBuffers, d.readBuffers[i][offset:offset+d.sizeBuffer[i]])
+	}
+	if len(d.packetBuffers) == 0 {
+		return 0, nil
 	}
 
 	dataSize := copy(p, d.packetBuffers[0])

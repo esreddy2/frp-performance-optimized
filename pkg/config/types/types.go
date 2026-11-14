@@ -63,6 +63,8 @@ func (q *BandwidthQuantity) String() string {
 func (q *BandwidthQuantity) UnmarshalString(s string) error {
 	s = strings.TrimSpace(s)
 	if s == "" {
+		q.s = ""
+		q.i = 0
 		return nil
 	}
 
@@ -83,9 +85,16 @@ func (q *BandwidthQuantity) UnmarshalString(s string) error {
 	if err != nil {
 		return err
 	}
+	if f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
+		return errors.New("bandwidth quantity must be a non-negative finite number")
+	}
+	bytes := f * float64(base)
+	if bytes >= float64(math.MaxInt64) {
+		return errors.New("bandwidth quantity overflows int64")
+	}
 
 	q.s = s
-	q.i = int64(f * float64(base))
+	q.i = int64(bytes)
 	return nil
 }
 

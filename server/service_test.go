@@ -676,7 +676,7 @@ func TestServiceRegisterControlPoolCountBoundaries(t *testing.T) {
 			svr.cfg.Transport.MaxPoolCount = 5
 			conn := newDeadlineReadConn()
 			msgConn := msg.NewConn(conn, msg.NewV1ReadWriter(conn))
-			const timestamp = int64(1)
+			timestamp := time.Now().Unix()
 
 			ctl, err := svr.RegisterControl(msgConn, &msg.Login{
 				RunID:        "pool-count-run",

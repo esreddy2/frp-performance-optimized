@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"time"
 
 	kcp "github.com/xtaci/kcp-go/v5"
 )
@@ -52,39 +53,58 @@ func ListenKcp(address string) (l *KCPListener, err error) {
 		done:     make(chan struct{}),
 	}
 
-	go func() {
-		for {
-			conn, err := listener.AcceptKCP()
-			if err != nil {
-				select {
-				case <-l.done:
-					return
-				default:
-					continue
-				}
-			}
-			conn.SetStreamMode(true)
-			conn.SetWriteDelay(true)
-			conn.SetNoDelay(1, 20, 2, 1)
-			conn.SetMtu(1350)
-			conn.SetWindowSize(1024, 1024)
-			conn.SetACKNoDelay(false)
+	go l.runAcceptLoop(listener.AcceptKCP)
+	return l, err
+}
 
-			handoff := func() bool {
-				defer func() { _ = recover() }()
-				select {
-				case <-l.done:
-					return false
-				case l.acceptCh <- conn:
-					return true
-				}
+func (l *KCPListener) runAcceptLoop(accept func() (*kcp.UDPSession, error)) {
+	var tempDelay time.Duration
+	for {
+		conn, err := accept()
+		if err != nil {
+			select {
+			case <-l.done:
+				return
+			default:
 			}
-			if !handoff() {
-				conn.Close()
+			if tempDelay == 0 {
+				tempDelay = 5 * time.Millisecond
+			} else {
+				tempDelay *= 2
+			}
+			if maxDelay := time.Second; tempDelay > maxDelay {
+				tempDelay = maxDelay
+			}
+			timer := time.NewTimer(tempDelay)
+			select {
+			case <-l.done:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			continue
+		}
+		tempDelay = 0
+		conn.SetStreamMode(true)
+		conn.SetWriteDelay(true)
+		conn.SetNoDelay(1, 20, 2, 1)
+		conn.SetMtu(1350)
+		conn.SetWindowSize(1024, 1024)
+		conn.SetACKNoDelay(false)
+
+		handoff := func() bool {
+			defer func() { _ = recover() }()
+			select {
+			case <-l.done:
+				return false
+			case l.acceptCh <- conn:
+				return true
 			}
 		}
-	}()
-	return l, err
+		if !handoff() {
+			conn.Close()
+		}
+	}
 }
 
 func (l *KCPListener) Accept() (net.Conn, error) {

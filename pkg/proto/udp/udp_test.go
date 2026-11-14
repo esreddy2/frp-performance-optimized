@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/fatedier/frp/pkg/msg"
+	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
 func TestUdpPacket(t *testing.T) {
@@ -80,7 +81,8 @@ func TestForwardUserConnStopsTheReaderOnTheStopChannel(t *testing.T) {
 	stopCh := make(chan struct{})
 	t.Cleanup(func() { close(readCh) })
 
-	go ForwardUserConn(service, readCh, sendCh, stopCh, 1500)
+	readerDone := make(chan struct{})
+	go forwardUserConn(service, readCh, sendCh, stopCh, 1500, readerDone)
 
 	readCh <- NewUDPPacket([]byte("before"), nil, user.LocalAddr().(*net.UDPAddr))
 
@@ -92,13 +94,66 @@ func TestForwardUserConnStopsTheReaderOnTheStopChannel(t *testing.T) {
 
 	// The stop channel ends the reader of the forwarder.
 	close(stopCh)
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-readerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reader of the forwarder did not stop")
+	}
 
 	readCh <- NewUDPPacket([]byte("after"), nil, user.LocalAddr().(*net.UDPAddr))
 
 	require.NoError(user.SetReadDeadline(time.Now().Add(500 * time.Millisecond)))
 	_, _, err = user.ReadFromUDP(buf)
 	require.Error(err, "the reader of the forwarder was not stopped")
+}
+
+func TestForwardUserConnSkipsNilPacket(t *testing.T) {
+	require := require.New(t)
+
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	user, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = user.Close() })
+
+	readCh := make(chan *msg.UDPPacket, 4)
+	sendCh := make(chan *msg.UDPPacket, 4)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() {
+		close(readCh)
+		close(sendCh)
+	})
+
+	readerDone := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		forwardUserConn(service, readCh, sendCh, stopCh, 1500, readerDone)
+		close(done)
+	}()
+
+	readCh <- nil
+	readCh <- NewUDPPacket([]byte("after-nil"), nil, user.LocalAddr().(*net.UDPAddr))
+
+	buf := make([]byte, 64)
+	require.NoError(user.SetReadDeadline(time.Now().Add(3 * time.Second)))
+	n, _, err := user.ReadFromUDP(buf)
+	require.NoError(err)
+	require.Equal("after-nil", string(buf[:n]))
+
+	close(stopCh)
+	select {
+	case <-readerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the reader of ForwardUserConn did not stop")
+	}
+	_ = service.Close()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ForwardUserConn did not return after closing udpConn")
+	}
 }
 
 // The stop channel ends the reader of the forwarder. The caller cannot
@@ -126,13 +181,21 @@ func TestForwarderStopsTheReaderOnTheStopChannel(t *testing.T) {
 
 	buf := make([]byte, 64)
 	require.NoError(service.SetReadDeadline(time.Now().Add(5 * time.Second)))
-	n, _, err := service.ReadFromUDP(buf)
+	n, fromAddr, err := service.ReadFromUDP(buf)
 	require.NoError(err)
 	require.Equal("before", string(buf[:n]))
 
-	// The stop channel ends the reader of the forwarder.
+	// The stop channel ends the reader of the forwarder and closes all active
+	// flow sockets. Probing the ephemeral port confirms the stop branch ran.
 	close(stopCh)
-	time.Sleep(100 * time.Millisecond)
+	require.Eventually(func() bool {
+		probe, probeErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: fromAddr.Port})
+		if probeErr != nil {
+			return false
+		}
+		_ = probe.Close()
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "the forwarder did not stop and close its flow socket")
 
 	readCh <- NewUDPPacket([]byte("after"), nil, userAddr)
 
@@ -170,7 +233,15 @@ func TestForwarderClosesFlowSocketsOnStopChannel(t *testing.T) {
 	// in udpConnMap rather than leaving them open for the 30-second idle timeout.
 	close(stopCh)
 
-	time.Sleep(100 * time.Millisecond)
+	require.Eventually(func() bool {
+		probe, probeErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: fromAddr.Port})
+		if probeErr != nil {
+			return false
+		}
+		_ = probe.Close()
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "the flow socket was not closed immediately on stopCh")
+
 	_, _ = service.WriteToUDP([]byte("late-reply"), fromAddr)
 
 	select {
@@ -437,4 +508,525 @@ func TestRemoveUDPConnDoesNotDropAReplacementSocket(t *testing.T) {
 	removeUDPConn(udpConnMap, &mu, "user", second)
 	_, ok = udpConnMap["user"]
 	require.False(ok, "the socket must be removed by its owner")
+}
+
+func TestForwarderTProxySkipsNilRemoteAddr(t *testing.T) {
+	require := require.New(t)
+
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	readCh := make(chan *msg.UDPPacket, 4)
+	sendCh := make(chan msg.Message, 4)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() {
+		close(stopCh)
+		close(readCh)
+	})
+
+	errCh := make(chan error, 1)
+	Forwarder(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, "tproxy", ForwarderOptions{
+		ProxyProtocol: "tproxy",
+		OnError: func(err error, raddr net.Addr, dstAddr net.Addr) {
+			errCh <- err
+		},
+	})
+
+	readCh <- NewUDPPacket([]byte("should-drop"), nil, nil)
+
+	select {
+	case gotErr := <-errCh:
+		require.Contains(gotErr.Error(), "non-nil remote address")
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected OnError callback for nil RemoteAddr under tproxy")
+	}
+
+	require.NoError(service.SetReadDeadline(time.Now().Add(150 * time.Millisecond)))
+	buf := make([]byte, 64)
+	_, _, readErr := service.ReadFromUDP(buf)
+	require.Error(readErr, "service must not receive packet when RemoteAddr is nil under tproxy")
+}
+
+func TestForwarderProxyProtocolHeaderErrorSkipsWrite(t *testing.T) {
+	require := require.New(t)
+
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	readCh := make(chan *msg.UDPPacket, 4)
+	sendCh := make(chan msg.Message, 4)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() {
+		close(stopCh)
+		close(readCh)
+	})
+
+	errCh := make(chan error, 1)
+	Forwarder(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, "v1", ForwarderOptions{
+		ProxyProtocol: "v1",
+		OnError: func(err error, raddr net.Addr, dstAddr net.Addr) {
+			errCh <- err
+		},
+	})
+
+	// Empty IP on RemoteAddr causes BuildProxyProtocolHeader to return an error.
+	userAddr := &net.UDPAddr{Port: 12345}
+	readCh <- NewUDPPacket([]byte("must-not-send"), nil, userAddr)
+
+	select {
+	case gotErr := <-errCh:
+		require.Error(gotErr)
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected OnError callback when proxy protocol header build fails")
+	}
+
+	require.NoError(service.SetReadDeadline(time.Now().Add(150 * time.Millisecond)))
+	buf := make([]byte, 64)
+	_, _, readErr := service.ReadFromUDP(buf)
+	require.Error(readErr, "service must not receive raw payload when proxy protocol header build fails")
+}
+
+func TestForwarderWithDoneWaitsForAllFlowsOnStopChannel(t *testing.T) {
+	require := require.New(t)
+
+	receivedCh := make(chan serviceDatagram, 8)
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, readErr := service.ReadFromUDP(buf)
+			if readErr != nil {
+				return
+			}
+			payload := make([]byte, n)
+			copy(payload, buf[:n])
+			receivedCh <- serviceDatagram{payload: payload, from: from}
+			_, _ = service.WriteToUDP(payload, from)
+		}
+	}()
+
+	readCh := make(chan *msg.UDPPacket, 8)
+	sendCh := make(chan msg.Message, 8)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() { close(readCh) })
+
+	done := ForwarderWithDone(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, "")
+
+	user1 := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 10001}
+	user2 := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 11), Port: 10002}
+	readCh <- NewUDPPacket([]byte("one"), nil, user1)
+	readCh <- NewUDPPacket([]byte("two"), nil, user2)
+
+	d1 := receiveServiceDatagram(t, receivedCh)
+	d2 := receiveServiceDatagram(t, receivedCh)
+
+	// Drain both replies so both writerFn goroutines are actively running.
+	for range 2 {
+		select {
+		case <-sendCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for service reply")
+		}
+	}
+
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ForwarderWithDone did not close done after stopCh")
+	}
+
+	// All writerFn goroutines have exited before done closed, so closing sendCh
+	// is race-free and panic-free even if the service sends late datagrams.
+	close(sendCh)
+	_, _ = service.WriteToUDP([]byte("late-1"), d1.from)
+	_, _ = service.WriteToUDP([]byte("late-2"), d2.from)
+
+	// Both flow sockets must already be closed by the time done closes.
+	for _, addr := range []*net.UDPAddr{d1.from, d2.from} {
+		probe, probeErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: addr.Port})
+		require.NoError(probeErr, "flow socket %s should be closed before done closes", addr)
+		_ = probe.Close()
+	}
+}
+
+func TestForwarderWithDoneClosesOnReadChannelClose(t *testing.T) {
+	require := require.New(t)
+
+	receivedCh := make(chan serviceDatagram, 4)
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, readErr := service.ReadFromUDP(buf)
+			if readErr != nil {
+				return
+			}
+			payload := make([]byte, n)
+			copy(payload, buf[:n])
+			receivedCh <- serviceDatagram{payload: payload, from: from}
+		}
+	}()
+
+	readCh := make(chan *msg.UDPPacket, 4)
+	sendCh := make(chan msg.Message, 4)
+	stopCh := make(chan struct{})
+
+	done := ForwarderWithDone(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, "")
+
+	userAddr := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 12), Port: 10003}
+	readCh <- NewUDPPacket([]byte("hello"), nil, userAddr)
+	d := receiveServiceDatagram(t, receivedCh)
+
+	// Closing readCh without closing stopCh should still tear down all flow sockets
+	// and wait for writerFn goroutines before closing done.
+	close(readCh)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ForwarderWithDone did not close done after readCh closed")
+	}
+
+	close(sendCh)
+	probe, probeErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: d.from.Port})
+	require.NoError(probeErr, "flow socket should be closed after readCh closes")
+	_ = probe.Close()
+}
+
+func TestForwarderWithDoneClosesImmediatelyWithNoActiveFlows(t *testing.T) {
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	readCh := make(chan *msg.UDPPacket)
+	sendCh := make(chan msg.Message)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() { close(readCh) })
+
+	done := ForwarderWithDone(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, "")
+
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ForwarderWithDone did not close done immediately with no active flows")
+	}
+	close(sendCh)
+}
+
+func TestForwarderWithDoneConcurrentFlowChurnAndIdleTimeout(t *testing.T) {
+	require := require.New(t)
+
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, readErr := service.ReadFromUDP(buf)
+			if readErr != nil {
+				return
+			}
+			_, _ = service.WriteToUDP(buf[:n], from)
+		}
+	}()
+
+	readCh := make(chan *msg.UDPPacket, 64)
+	sendCh := make(chan msg.Message, 64)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() { close(readCh) })
+
+	done := forwarderWithIdleTimeout(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, "", "", 15*time.Millisecond)
+
+	// Drain sendCh concurrently until it is closed after <-done.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for m := range sendCh {
+			_ = m
+		}
+	}()
+
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for i := range 60 {
+		userAddr := &net.UDPAddr{IP: net.IPv4(203, 0, 113, byte(20+(i%15))), Port: 20000 + (i % 15)}
+		readCh <- NewUDPPacket([]byte("ping"), nil, userAddr)
+		if i%10 == 0 {
+			<-ticker.C
+		}
+	}
+
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ForwarderWithDone did not close done under flow churn")
+	}
+
+	// Closing sendCh immediately after <-done must not panic or race.
+	close(sendCh)
+	select {
+	case <-drainDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drain goroutine did not exit after sendCh closed")
+	}
+}
+
+func TestForwarderSkipsNilRemoteAddrNonTProxy(t *testing.T) {
+	for _, ppVersion := range []string{"", "v1", "v2"} {
+		t.Run("pp="+ppVersion, func(t *testing.T) {
+			require := require.New(t)
+
+			service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			require.NoError(err)
+			t.Cleanup(func() { _ = service.Close() })
+
+			readCh := make(chan *msg.UDPPacket, 4)
+			sendCh := make(chan msg.Message, 4)
+			stopCh := make(chan struct{})
+			t.Cleanup(func() {
+				close(stopCh)
+				close(readCh)
+			})
+
+			errCh := make(chan error, 1)
+			Forwarder(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, ppVersion, ForwarderOptions{
+				ProxyProtocol: ppVersion,
+				OnError: func(err error, raddr net.Addr, dstAddr net.Addr) {
+					errCh <- err
+				},
+			})
+
+			readCh <- nil
+			readCh <- NewUDPPacket([]byte("should-drop"), nil, nil)
+
+			select {
+			case gotErr := <-errCh:
+				require.Contains(gotErr.Error(), "non-nil remote address")
+			case <-time.After(3 * time.Second):
+				t.Fatal("expected OnError callback for nil RemoteAddr")
+			}
+
+			require.NoError(service.SetReadDeadline(time.Now().Add(150 * time.Millisecond)))
+			buf := make([]byte, 64)
+			_, _, readErr := service.ReadFromUDP(buf)
+			require.Error(readErr, "service must not receive packet when RemoteAddr is nil")
+		})
+	}
+
+	t.Run("OnError_nil", func(t *testing.T) {
+		require := require.New(t)
+
+		service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		require.NoError(err)
+		t.Cleanup(func() { _ = service.Close() })
+
+		readCh := make(chan *msg.UDPPacket, 4)
+		sendCh := make(chan msg.Message, 4)
+		stopCh := make(chan struct{})
+
+		done := ForwarderWithDone(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, "")
+		readCh <- nil
+		readCh <- NewUDPPacket([]byte("should-drop"), nil, nil)
+
+		require.NoError(service.SetReadDeadline(time.Now().Add(150 * time.Millisecond)))
+		buf := make([]byte, 64)
+		_, _, readErr := service.ReadFromUDP(buf)
+		require.Error(readErr, "service must not receive packet when RemoteAddr is nil")
+
+		close(stopCh)
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("ForwarderWithDone did not close done after stopCh")
+		}
+		close(readCh)
+		close(sendCh)
+	})
+}
+
+func TestForwarderWriterReturnsWhenSendChannelIsClosed(t *testing.T) {
+	require := require.New(t)
+
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	clientAddrCh := make(chan *net.UDPAddr, 1)
+	go func() {
+		buf := make([]byte, 2048)
+		n, from, readErr := service.ReadFromUDP(buf)
+		if readErr != nil {
+			return
+		}
+		_, _ = service.WriteToUDP(buf[:n], from)
+		clientAddrCh <- from
+	}()
+
+	readCh := make(chan *msg.UDPPacket, 4)
+	sendCh := make(chan msg.Message)
+	close(sendCh)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() { close(readCh) })
+
+	done := ForwarderWithDone(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, "")
+
+	userAddr := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 30), Port: 12345}
+	readCh <- NewUDPPacket([]byte("trigger"), nil, userAddr)
+
+	var clientAddr *net.UDPAddr
+	select {
+	case clientAddr = <-clientAddrCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("service did not receive packet and send reply")
+	}
+
+	// Verify writerFn exits and closes its flow socket on closed sendCh before stopCh is closed.
+	require.Eventually(func() bool {
+		probe, probeErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: clientAddr.Port})
+		if probeErr != nil {
+			return false
+		}
+		_ = probe.Close()
+		return true
+	}, 3*time.Second, 10*time.Millisecond, "writerFn did not exit and close flow socket after sending on closed sendCh")
+
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ForwarderWithDone did not close done after stopCh")
+	}
+}
+
+func TestForwarderProxyProtocolPerPacketPoolReuse(t *testing.T) {
+	require := require.New(t)
+
+	receivedCh := make(chan serviceDatagram, 16)
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, from, readErr := service.ReadFromUDP(buf)
+			if readErr != nil {
+				return
+			}
+			payload := make([]byte, n)
+			copy(payload, buf[:n])
+			receivedCh <- serviceDatagram{payload: payload, from: from}
+		}
+	}()
+
+	readCh := make(chan *msg.UDPPacket, 16)
+	sendCh := make(chan msg.Message, 16)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() {
+		close(readCh)
+		close(sendCh)
+	})
+
+	done := ForwarderWithDone(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 2048, "v2", ForwarderOptions{
+		ProxyProtocol:     "v2",
+		ProxyProtocolMode: "per-packet",
+	})
+
+	userAddr := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 44), Port: 54321}
+	dstAddr := service.LocalAddr().(*net.UDPAddr)
+	expectedHeader, err := netpkg.BuildProxyProtocolHeader(userAddr, dstAddr, "v2")
+	require.NoError(err)
+
+	sizes := []int{10, 1400, 32, 1400, 5}
+	for i, sz := range sizes {
+		payload := make([]byte, sz)
+		for j := range payload {
+			payload[j] = byte(i + j)
+		}
+		readCh <- NewUDPPacket(payload, nil, userAddr)
+
+		d := receiveServiceDatagram(t, receivedCh)
+		require.Len(d.payload, len(expectedHeader)+sz)
+		require.Equal(expectedHeader, d.payload[:len(expectedHeader)])
+		require.Equal(payload, d.payload[len(expectedHeader):])
+	}
+
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ForwarderWithDone did not close done after stopCh")
+	}
+}
+
+func TestForwarderProxyProtocolHeaderErrorDoesNotLeaveStaleFlow(t *testing.T) {
+	for _, ppVersion := range []string{"v1", "v2"} {
+		t.Run(ppVersion, func(t *testing.T) {
+			require := require.New(t)
+
+			service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			require.NoError(err)
+			t.Cleanup(func() { _ = service.Close() })
+
+			readCh := make(chan *msg.UDPPacket, 4)
+			sendCh := make(chan msg.Message, 4)
+			stopCh := make(chan struct{})
+			t.Cleanup(func() {
+				close(readCh)
+				close(sendCh)
+			})
+
+			errCh := make(chan error, 4)
+			done := ForwarderWithDone(service.LocalAddr().(*net.UDPAddr), readCh, sendCh, stopCh, 1500, ppVersion, ForwarderOptions{
+				ProxyProtocol: ppVersion,
+				OnError: func(err error, raddr net.Addr, dstAddr net.Addr) {
+					errCh <- err
+				},
+			})
+
+			// UDPAddr with nil IP passes RemoteAddr != nil check, but causes BuildProxyProtocolHeader to fail.
+			badAddr := &net.UDPAddr{Port: 1234}
+
+			// First packet: must fail header construction and not register a stale flow.
+			readCh <- NewUDPPacket([]byte("first-bad"), nil, badAddr)
+			select {
+			case gotErr := <-errCh:
+				require.Contains(gotErr.Error(), "invalid proxy protocol version or addresses")
+			case <-time.After(3 * time.Second):
+				t.Fatal("expected OnError for first packet with nil RemoteAddr.IP")
+			}
+
+			// Second packet for the same RemoteAddr: if a stale flow were left in udpConnMap,
+			// first-packet mode would treat it as an existing flow, skip BuildProxyProtocolHeader,
+			// and forward the raw payload to service without a Proxy Protocol header.
+			readCh <- NewUDPPacket([]byte("second-bad"), nil, badAddr)
+			select {
+			case gotErr := <-errCh:
+				require.Contains(gotErr.Error(), "invalid proxy protocol version or addresses")
+			case <-time.After(3 * time.Second):
+				t.Fatal("expected OnError for second packet; stale flow may have been left in udpConnMap")
+			}
+
+			require.NoError(service.SetReadDeadline(time.Now().Add(150 * time.Millisecond)))
+			buf := make([]byte, 64)
+			_, _, readErr := service.ReadFromUDP(buf)
+			require.Error(readErr, "service must not receive any packet when BuildProxyProtocolHeader fails")
+
+			close(stopCh)
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("ForwarderWithDone did not close done after stopCh")
+			}
+		})
+	}
 }

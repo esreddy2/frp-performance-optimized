@@ -200,6 +200,21 @@ func (pxy *BaseProxy) Close() {
 	}
 }
 
+func parseAddrHostPort(addr net.Addr) (string, uint16) {
+	if addr == nil {
+		return "", 0
+	}
+	host, portStr, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", 0
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return "", 0
+	}
+	return host, uint16(port)
+}
+
 // GetWorkConnFromPool try to get a new work connections from pool
 // for quickly response, we immediately send the StartWorkConn message to frpc after take out one from pool
 func (pxy *BaseProxy) GetWorkConnFromPool(src, dst net.Addr) (workConn net.Conn, err error) {
@@ -218,23 +233,8 @@ func (pxy *BaseProxy) GetWorkConnFromPool(src, dst net.Addr) (workConn net.Conn,
 		// already takes its own logger via FromContextSafe, so remove it.
 		_ = pxy.GetName()
 
-		var (
-			srcAddr    string
-			dstAddr    string
-			srcPortStr string
-			dstPortStr string
-			srcPort    uint64
-			dstPort    uint64
-		)
-
-		if src != nil {
-			srcAddr, srcPortStr, _ = net.SplitHostPort(src.String())
-			srcPort, _ = strconv.ParseUint(srcPortStr, 10, 16)
-		}
-		if dst != nil {
-			dstAddr, dstPortStr, _ = net.SplitHostPort(dst.String())
-			dstPort, _ = strconv.ParseUint(dstPortStr, 10, 16)
-		}
+		srcAddr, srcPort := parseAddrHostPort(src)
+		dstAddr, dstPort := parseAddrHostPort(dst)
 		// confirm QUIC datagram relay only when this specific work
 		// connection can actually carry it
 		udpDatagram := false
@@ -246,9 +246,9 @@ func (pxy *BaseProxy) GetWorkConnFromPool(src, dst net.Addr) (workConn net.Conn,
 		workConn, err = pxyWorkConn.Start(&msg.StartWorkConn{
 			ProxyName:         pxy.GetName(),
 			SrcAddr:           srcAddr,
-			SrcPort:           uint16(srcPort),
+			SrcPort:           srcPort,
 			DstAddr:           dstAddr,
-			DstPort:           uint16(dstPort),
+			DstPort:           dstPort,
 			Error:             "",
 			UDPDatagram:       udpDatagram,
 			UDPDatagramStrict: udpDatagram && pxy.udpDatagramStrict,
@@ -574,7 +574,7 @@ func bridgeSUDPVisitorToProxy(from msg.ReadWriter, to msg.ReadWriter, count *int
 }
 
 func normalizeSUDPBridgeError(err error) error {
-	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
 		return nil
 	}
 	return err

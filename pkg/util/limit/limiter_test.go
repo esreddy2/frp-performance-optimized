@@ -113,3 +113,38 @@ func TestAllowNIsANoOpWithoutLimiter(t *testing.T) {
 	require.True(t, AllowN(nil, time.Now(), 0))
 	require.True(t, AllowN(nil, time.Now(), -1))
 }
+
+func TestReaderAndWriterChunkingByBurst(t *testing.T) {
+	require := require.New(t)
+
+	// Zero-length read/write succeeds even when burst <= 0
+	zeroLimiter := rate.NewLimiter(rate.Limit(100), 0)
+	rZero := NewReader(strings.NewReader("abc"), zeroLimiter)
+	n, err := rZero.Read(nil)
+	require.NoError(err)
+	require.Zero(n)
+
+	var dstZero bytes.Buffer
+	wZero := NewWriter(&dstZero, zeroLimiter)
+	n, err = wZero.Write(nil)
+	require.NoError(err)
+	require.Zero(n)
+
+	// Reader chunks reads larger than burst
+	rLimiter := rate.NewLimiter(rate.Limit(10000), 4)
+	r := NewReader(strings.NewReader("0123456789"), rLimiter)
+	buf := make([]byte, 10)
+	n, err = r.Read(buf)
+	require.NoError(err)
+	require.Equal(4, n)
+	require.Equal("0123", string(buf[:n]))
+
+	// Writer splits writes larger than burst across multiple chunks
+	wLimiter := rate.NewLimiter(rate.Limit(10000), 3)
+	var dst bytes.Buffer
+	w := NewWriter(&dst, wLimiter)
+	n, err = w.Write([]byte("abcdefghij"))
+	require.NoError(err)
+	require.Equal(10, n)
+	require.Equal("abcdefghij", dst.String())
+}

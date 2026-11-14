@@ -16,6 +16,7 @@
       :placeholder="placeholder"
       :disabled="disabled"
       @update:model-value="handleNumberInput($event)"
+      @blur="handleNumberBlur"
     />
     <!-- switch -->
     <div v-else-if="type === 'switch'" class="config-field-switch-wrap">
@@ -112,7 +113,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import KeyValueEditor from './KeyValueEditor.vue'
 import StringListEditor from './StringListEditor.vue'
 import PopoverMenu from '@shared/components/PopoverMenu.vue'
@@ -154,6 +155,8 @@ const emit = defineEmits<{
   'update:modelValue': [value: any]
 }>()
 
+const INTEGER_PATTERN = /^[+-]?\d+$/
+
 const numberDraft = ref(
   props.modelValue != null ? String(props.modelValue) : '',
 )
@@ -171,28 +174,103 @@ watch(
   },
 )
 
-const handleNumberInput = (val: string) => {
-  numberDraft.value = val
-  if (val === '') {
-    emit('update:modelValue', undefined)
-    return
-  }
-  // Keep a leading sign as an editing state so negative values can be typed
-  // naturally. The form value is updated once the input becomes a number.
-  if (val === '-' || val === '+') {
-    preserveNumberDraft.value = true
-    emit('update:modelValue', undefined)
-    return
-  }
-  const num = Number(val)
-  if (!isNaN(num)) {
-    let clamped = num
-    if (props.min != null && clamped < props.min) clamped = props.min
-    if (props.max != null && clamped > props.max) clamped = props.max
-    numberDraft.value = String(clamped)
-    emit('update:modelValue', clamped)
+const resetNumberDraftTo = (val: string, nextDraft: string) => {
+  if (numberDraft.value === nextDraft) {
+    numberDraft.value = val
+    void nextTick(() => {
+      if (numberDraft.value === val) {
+        numberDraft.value = nextDraft
+      }
+    })
+  } else {
+    numberDraft.value = nextDraft
   }
 }
+
+const handleNumberInput = (val: string) => {
+  const trimmed = val.trim()
+  if (trimmed === '') {
+    preserveNumberDraft.value = false
+    resetNumberDraftTo(val, '')
+    emit('update:modelValue', undefined)
+    return
+  }
+
+  const fallbackDraft =
+    numberDraft.value === '-' || numberDraft.value === '+'
+      ? numberDraft.value
+      : props.modelValue != null
+        ? String(props.modelValue)
+        : ''
+
+  if (
+    (trimmed === '-' && props.min != null && props.min >= 0) ||
+    (trimmed === '+' && props.max != null && props.max < 0)
+  ) {
+    preserveNumberDraft.value = false
+    resetNumberDraftTo(val, fallbackDraft)
+    return
+  }
+
+  // Keep a leading sign as an editing state so negative values can be typed
+  // naturally. The form value is updated once the input becomes a number.
+  if (trimmed === '-' || trimmed === '+') {
+    preserveNumberDraft.value = props.modelValue != null
+    resetNumberDraftTo(val, trimmed)
+    emit('update:modelValue', undefined)
+    return
+  }
+
+  if (!INTEGER_PATTERN.test(trimmed)) {
+    preserveNumberDraft.value = false
+    resetNumberDraftTo(val, fallbackDraft)
+    return
+  }
+
+  const num = Number(trimmed)
+  if (!Number.isFinite(num)) {
+    preserveNumberDraft.value = false
+    resetNumberDraftTo(val, fallbackDraft)
+    return
+  }
+
+  preserveNumberDraft.value = false
+  let clamped = num
+  if (props.min != null && clamped < props.min) clamped = props.min
+  if (props.max != null && clamped > props.max) clamped = props.max
+  if (clamped === 0) clamped = 0
+
+  if (!Number.isSafeInteger(clamped)) {
+    resetNumberDraftTo(val, fallbackDraft)
+    return
+  }
+
+  resetNumberDraftTo(val, String(clamped))
+  emit('update:modelValue', clamped)
+}
+
+const handleNumberBlur = () => {
+  const trimmed = numberDraft.value.trim()
+  if (trimmed === '-' || trimmed === '+') {
+    preserveNumberDraft.value = false
+    numberDraft.value = props.modelValue != null ? String(props.modelValue) : ''
+  }
+}
+
+watch(
+  [() => props.min, () => props.max],
+  ([min, max]) => {
+    const trimmed = numberDraft.value.trim()
+    if (
+      (trimmed === '-' && min != null && min >= 0) ||
+      (trimmed === '+' && max != null && max < 0)
+    ) {
+      preserveNumberDraft.value = false
+      numberDraft.value =
+        props.modelValue != null ? String(props.modelValue) : ''
+    }
+  },
+)
 
 const selectDisplayValue = computed(() => {
   const opt = props.options.find((o) => o.value === props.modelValue)

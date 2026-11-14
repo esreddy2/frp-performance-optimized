@@ -22,7 +22,17 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
 	return e.Err.Error()
+}
+
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 func NewError(code int, msg string) *Error {
