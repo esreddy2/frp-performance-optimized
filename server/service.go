@@ -885,13 +885,9 @@ func (ac *acceptedConnection) newControlReadWriter(rw io.ReadWriter, key []byte,
 				log.Warnf("client did not offer an X25519 key share; the v2 control channel is not protected against passive observers, upgrade frpc")
 			}
 		}
-		ikm := ac.cryptoContext.DeriveIKM(key)
-		if len(ikm) == 0 {
-			return netpkg.NewCryptoReadWriter(rw, key)
-		}
 		return netpkg.NewAEADCryptoReadWriter(
 			rw,
-			ikm,
+			ac.cryptoContext.DeriveIKM(key),
 			netpkg.AEADCryptoRoleServer,
 			ac.cryptoContext.Algorithm,
 			ac.cryptoContext.TranscriptHash,

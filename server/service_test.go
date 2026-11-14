@@ -37,6 +37,7 @@ import (
 	"github.com/fatedier/frp/pkg/msg"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/pkg/proto/wire"
+	netpkg "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/server/controller"
 	"github.com/fatedier/frp/server/proxy"
@@ -1003,12 +1004,33 @@ func TestAcceptedConnectionNewControlReadWriterKeyingMaterial(t *testing.T) {
 			defer clientRaw.Close()
 			defer serverRaw.Close()
 
-			_, err := ac.newControlReadWriter(serverRaw, nil, tc.method, tc.require)
+			serverRW, err := ac.newControlReadWriter(serverRaw, nil, tc.method, tc.require)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
 			}
 			require.NoError(t, err)
+
+			clientRW, err := netpkg.NewAEADCryptoReadWriter(
+				clientRaw,
+				ac.cryptoContext.DeriveIKM(nil),
+				netpkg.AEADCryptoRoleClient,
+				ac.cryptoContext.Algorithm,
+				ac.cryptoContext.TranscriptHash,
+			)
+			require.NoError(t, err)
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- msg.WriteMsg(clientRW, &msg.Ping{Timestamp: 42})
+			}()
+
+			gotMsg, err := msg.ReadMsg(serverRW)
+			require.NoError(t, err)
+			require.NoError(t, <-errCh)
+			gotPing, ok := gotMsg.(*msg.Ping)
+			require.True(t, ok)
+			require.Equal(t, int64(42), gotPing.Timestamp)
 		})
 	}
 }
