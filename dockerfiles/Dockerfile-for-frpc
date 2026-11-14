@@ -10,7 +10,7 @@ COPY web/shared/ ./shared/
 COPY web/frpc/ ./frpc/
 RUN npm run build --workspace frpc
 
-FROM golang:1.26 AS building
+FROM golang:1.27 AS building
 
 COPY . /building
 COPY --from=web-builder /web/frpc/dist /building/web/frpc/dist
