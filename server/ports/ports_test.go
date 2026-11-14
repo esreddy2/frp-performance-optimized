@@ -61,8 +61,15 @@ func (pm *Manager) hasReservedPort(name string) bool {
 	return ok
 }
 
-func freeTCPPort(t *testing.T) int {
+func freePort(t *testing.T, network string) int {
 	t.Helper()
+
+	if network == "udp" {
+		conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer conn.Close()
+		return conn.LocalAddr().(*net.UDPAddr).Port
+	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -71,41 +78,54 @@ func freeTCPPort(t *testing.T) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	return freePort(t, "tcp")
+}
+
 func TestManagerReservedPortDoesNotStealAllocatedPort(t *testing.T) {
-	require := require.New(t)
+	for _, network := range []string{"tcp", "udp"} {
+		t.Run(network, func(t *testing.T) {
+			require := require.New(t)
 
-	p1 := freeTCPPort(t)
-	p2 := freeTCPPort(t)
-	if p1 == p2 {
-		p2 = freeTCPPort(t)
+			p1 := freePort(t, network)
+			p2 := freePort(t, network)
+			for p1 == p2 {
+				p2 = freePort(t, network)
+			}
+			pm := NewManager(network, "127.0.0.1", []types.PortsRange{{Single: p1}, {Single: p2}})
+			defer pm.Close()
+
+			// proxy-a acquires p1 and then releases it (p1 becomes reserved for proxy-a)
+			got1, err := pm.Acquire("proxy-a", p1)
+			require.NoError(err)
+			require.Equal(p1, got1)
+			pm.Release(p1)
+
+			// proxy-b explicitly acquires p1 before binding OS socket
+			gotB, err := pm.Acquire("proxy-b", p1)
+			require.NoError(err)
+			require.Equal(p1, gotB)
+
+			// proxy-a now requests a dynamic port (0): must NOT steal p1 from proxy-b, must get p2
+			gotA, err := pm.Acquire("proxy-a", 0)
+			require.NoError(err)
+			require.Equal(p2, gotA)
+			require.Equal("proxy-b", pm.usedPorts[p1].ProxyName)
+			require.Equal("proxy-a", pm.usedPorts[p2].ProxyName)
+
+			// When p2 is also held, proxy-c requesting 0 gets ErrNoAvailablePort
+			_, err = pm.Acquire("proxy-c", 0)
+			require.ErrorIs(err, ErrNoAvailablePort)
+
+			// Once both are released, proxy-a requesting 0 reuses its newly reserved port p2
+			pm.Release(p1)
+			pm.Release(p2)
+			reused, err := pm.Acquire("proxy-a", 0)
+			require.NoError(err)
+			require.Equal(p2, reused)
+		})
 	}
-	pm := NewManager("tcp", "127.0.0.1", []types.PortsRange{{Single: p1}, {Single: p2}})
-	defer pm.Close()
-
-	// proxy-a acquires p1 and then releases it (p1 becomes reserved for proxy-a)
-	got1, err := pm.Acquire("proxy-a", p1)
-	require.NoError(err)
-	require.Equal(p1, got1)
-	pm.Release(p1)
-
-	// proxy-b explicitly acquires p1 before binding OS socket
-	gotB, err := pm.Acquire("proxy-b", p1)
-	require.NoError(err)
-	require.Equal(p1, gotB)
-
-	// proxy-a now requests a dynamic port (0): must NOT steal p1 from proxy-b, must get p2
-	gotA, err := pm.Acquire("proxy-a", 0)
-	require.NoError(err)
-	require.Equal(p2, gotA)
-	require.Equal("proxy-b", pm.usedPorts[p1].ProxyName)
-	require.Equal("proxy-a", pm.usedPorts[p2].ProxyName)
-
-	// Once both are released, proxy-a requesting 0 reuses its newly reserved port p2
-	pm.Release(p1)
-	pm.Release(p2)
-	reused, err := pm.Acquire("proxy-a", 0)
-	require.NoError(err)
-	require.Equal(p2, reused)
 }
 
 func TestManagerAcquireErrorsAndUDPSupport(t *testing.T) {
