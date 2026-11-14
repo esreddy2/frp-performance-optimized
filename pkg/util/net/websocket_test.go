@@ -195,3 +195,37 @@ func TestWebsocketListenerAcceptedConnectionOwnership(t *testing.T) {
 		require.ErrorIs(t, err, io.ErrClosedPipe)
 	})
 }
+
+type failListener struct{}
+
+func (l *failListener) Accept() (net.Conn, error) {
+	return nil, errors.New("listener hardware failure")
+}
+
+func (l *failListener) Close() error {
+	return nil
+}
+
+func (l *failListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
+}
+
+func TestWebsocketListenerAcceptUnblocksOnServeError(t *testing.T) {
+	ln := &failListener{}
+	wl := NewWebsocketListener(ln)
+	defer wl.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := wl.Accept()
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, ErrWebsocketListenerClosed)
+		require.Contains(t, err.Error(), "listener hardware failure")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept() deadlocked when Serve(ln) exited with an error")
+	}
+}

@@ -1034,3 +1034,96 @@ func TestAcceptedConnectionNewControlReadWriterKeyingMaterial(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleListenerNonBlockingTLSCheck(t *testing.T) {
+	cfg := &v1.ServerConfig{
+		BindAddr: "127.0.0.1",
+		BindPort: 0,
+	}
+	require.NoError(t, cfg.Complete())
+	svr, err := NewService(cfg)
+	require.NoError(t, err)
+	defer svr.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	go svr.HandleListener(ln, false)
+
+	// Client 1 connects and stalls without sending TLS handshake data
+	conn1, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer conn1.Close()
+
+	// Client 2 connects immediately. The accept loop must NOT be blocked by client 1.
+	start := time.Now()
+	conn2, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer conn2.Close()
+	elapsed := time.Since(start)
+
+	// Since TLS check timeout is connReadTimeout (10s), client 2 must connect in well under 1 second.
+	require.Less(t, elapsed, time.Second)
+}
+
+func TestServiceVisitorWireProtocolFlexibility(t *testing.T) {
+	svr := newControlTestService(t)
+	listener, err := svr.rc.VisitorManager.Listen("visitor-flex", "secret", []string{"visitor-user"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	controlConn := newDeadlineReadConn()
+	controlMsgConn := msg.NewConn(controlConn, msg.NewV2ReadWriter(controlConn))
+	ctl, err := svr.RegisterControl(controlMsgConn, &msg.Login{
+		RunID:    "visitor-flex-run",
+		User:     "visitor-user",
+		ClientID: "visitor-client",
+		ClientSpec: msg.ClientSpec{
+			AlwaysAuthPass: true,
+		},
+	}, true, wire.ProtocolV2, "", nil)
+	require.NoError(t, err)
+
+	timestamp := time.Now().Unix()
+	visitorMsg := &msg.NewVisitorConn{
+		RunID:     "visitor-flex-run",
+		ProxyName: "visitor-flex",
+		Timestamp: timestamp,
+		SignKey:   util.GetAuthKey("secret", timestamp),
+	}
+	require.NoError(t, svr.completeControlLogin(ctl, func() error { return nil }))
+	waitForSignal(t, controlConn.readStarted, "flex visitor control reader to start")
+
+	// Visitor connects with WireProtocolV1 to WireProtocolV2 control without binary packet codec
+	flexConn := newCountingCloseConn()
+	require.NoError(t, svr.RegisterVisitorConn(flexConn, visitorMsg, wire.ProtocolV1))
+	accepted, err := listener.Accept()
+	require.NoError(t, err)
+	metadata, ok := accepted.(interface{ WireProtocol() string })
+	require.True(t, ok)
+	require.Equal(t, wire.ProtocolV1, metadata.WireProtocol(), "visitor connection must retain its own wire protocol")
+	require.NoError(t, accepted.Close())
+	require.Equal(t, int64(1), flexConn.closeCount.Load())
+
+	require.NoError(t, ctl.Close())
+	waitForControlDone(t, ctl)
+}
+
+func TestServiceVisitorOmittingRunIDTenantIsolation(t *testing.T) {
+	svr := newControlTestService(t)
+	listener, err := svr.rc.VisitorManager.Listen("alice.secret_stcp", "secret", []string{"alice"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	timestamp := time.Now().Unix()
+	visitorMsg := &msg.NewVisitorConn{
+		ProxyName: "alice.secret_stcp", // Namespaced tenant proxy
+		Timestamp: timestamp,
+		SignKey:   util.GetAuthKey("secret", timestamp),
+	}
+	visitorConn := newCountingCloseConn()
+	err = svr.RegisterVisitorConn(visitorConn, visitorMsg, wire.ProtocolV1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "run id is required for namespaced tenant proxy")
+}

@@ -34,6 +34,8 @@ func (v *ConfigValidator) validateAuthTokenSource(token string, tokenSource *v1.
 	if tokenSource.Type == "exec" {
 		if err := v.ValidateUnsafeFeature(security.TokenSourceExec); err != nil {
 			errs = AppendError(errs, err)
+		} else if tokenSource.Exec != nil {
+			tokenSource.Exec.Policy = v.unsafeFeatures
 		}
 	}
 	if err := tokenSource.Validate(); err != nil {

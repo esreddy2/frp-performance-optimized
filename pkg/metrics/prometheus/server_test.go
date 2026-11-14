@@ -44,6 +44,37 @@ func gatherMetricValue(t *testing.T, fqName string, labels map[string]string) fl
 	return 0
 }
 
+func metricExists(t *testing.T, fqName string, labels map[string]string) bool {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != fqName {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			matched := true
+			for k, v := range labels {
+				found := false
+				for _, lp := range m.GetLabel() {
+					if lp.GetName() == k && lp.GetValue() == v {
+						found = true
+						break
+					}
+				}
+				if !found {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestPrometheusServerMetricsUpdatesCountersAndGauges(t *testing.T) {
 	require := require.New(t)
 
@@ -70,5 +101,8 @@ func TestPrometheusServerMetricsUpdatesCountersAndGauges(t *testing.T) {
 
 	ServerMetrics.CloseProxy("pxy-prom", "tcp")
 	require.InDelta(0, gatherMetricValue(t, "frp_server_proxy_counts", map[string]string{"type": "tcp"}), 1e-9)
-	require.InDelta(0, gatherMetricValue(t, "frp_server_proxy_counts_detailed", map[string]string{"type": "tcp", "name": "pxy-prom"}), 1e-9)
+	require.False(metricExists(t, "frp_server_proxy_counts_detailed", map[string]string{"type": "tcp", "name": "pxy-prom"}))
+	require.False(metricExists(t, "frp_server_connection_counts", map[string]string{"name": "pxy-prom", "type": "tcp"}))
+	require.False(metricExists(t, "frp_server_traffic_in", map[string]string{"name": "pxy-prom", "type": "tcp"}))
+	require.False(metricExists(t, "frp_server_traffic_out", map[string]string{"name": "pxy-prom", "type": "tcp"}))
 }

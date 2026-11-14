@@ -57,6 +57,50 @@ func (p *ProxyDefinition) ToConfigurer() (v1.ProxyConfigurer, error) {
 	return cfg, nil
 }
 
+const MaskedSecret = "******"
+
+func maskProxySecrets(cfg v1.ProxyConfigurer) {
+	base := cfg.GetBaseConfig()
+	if base != nil && base.Plugin.ClientPluginOptions != nil {
+		switch opt := base.Plugin.ClientPluginOptions.(type) {
+		case *v1.HTTPProxyPluginOptions:
+			if opt.HTTPPassword != "" {
+				opt.HTTPPassword = MaskedSecret
+			}
+		case *v1.StaticFilePluginOptions:
+			if opt.HTTPPassword != "" {
+				opt.HTTPPassword = MaskedSecret
+			}
+		case *v1.Socks5PluginOptions:
+			if opt.Password != "" {
+				opt.Password = MaskedSecret
+			}
+		}
+	}
+	switch c := cfg.(type) {
+	case *v1.HTTPProxyConfig:
+		if c.HTTPPassword != "" {
+			c.HTTPPassword = MaskedSecret
+		}
+	case *v1.TCPMuxProxyConfig:
+		if c.HTTPPassword != "" {
+			c.HTTPPassword = MaskedSecret
+		}
+	case *v1.STCPProxyConfig:
+		if c.Secretkey != "" {
+			c.Secretkey = MaskedSecret
+		}
+	case *v1.SUDPProxyConfig:
+		if c.Secretkey != "" {
+			c.Secretkey = MaskedSecret
+		}
+	case *v1.XTCPProxyConfig:
+		if c.Secretkey != "" {
+			c.Secretkey = MaskedSecret
+		}
+	}
+}
+
 func ProxyDefinitionFromConfigurer(cfg v1.ProxyConfigurer) (ProxyDefinition, error) {
 	if cfg == nil {
 		return ProxyDefinition{}, fmt.Errorf("proxy config is nil")
@@ -70,21 +114,37 @@ func ProxyDefinitionFromConfigurer(cfg v1.ProxyConfigurer) (ProxyDefinition, err
 
 	switch c := cfg.(type) {
 	case *v1.TCPProxyConfig:
-		payload.TCP = c
+		cloned := c.Clone().(*v1.TCPProxyConfig)
+		maskProxySecrets(cloned)
+		payload.TCP = cloned
 	case *v1.UDPProxyConfig:
-		payload.UDP = c
+		cloned := c.Clone().(*v1.UDPProxyConfig)
+		maskProxySecrets(cloned)
+		payload.UDP = cloned
 	case *v1.HTTPProxyConfig:
-		payload.HTTP = c
+		cloned := c.Clone().(*v1.HTTPProxyConfig)
+		maskProxySecrets(cloned)
+		payload.HTTP = cloned
 	case *v1.HTTPSProxyConfig:
-		payload.HTTPS = c
+		cloned := c.Clone().(*v1.HTTPSProxyConfig)
+		maskProxySecrets(cloned)
+		payload.HTTPS = cloned
 	case *v1.TCPMuxProxyConfig:
-		payload.TCPMux = c
+		cloned := c.Clone().(*v1.TCPMuxProxyConfig)
+		maskProxySecrets(cloned)
+		payload.TCPMux = cloned
 	case *v1.STCPProxyConfig:
-		payload.STCP = c
+		cloned := c.Clone().(*v1.STCPProxyConfig)
+		maskProxySecrets(cloned)
+		payload.STCP = cloned
 	case *v1.SUDPProxyConfig:
-		payload.SUDP = c
+		cloned := c.Clone().(*v1.SUDPProxyConfig)
+		maskProxySecrets(cloned)
+		payload.SUDP = cloned
 	case *v1.XTCPProxyConfig:
-		payload.XTCP = c
+		cloned := c.Clone().(*v1.XTCPProxyConfig)
+		maskProxySecrets(cloned)
+		payload.XTCP = cloned
 	default:
 		return ProxyDefinition{}, fmt.Errorf("unsupported proxy configurer type %T", cfg)
 	}

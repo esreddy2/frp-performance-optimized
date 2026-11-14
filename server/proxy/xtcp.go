@@ -69,7 +69,10 @@ func (pxy *XTCPProxy) Run() (remoteAddr string, err error) {
 			select {
 			case <-pxy.closeCh:
 				return
-			case sid := <-sidCh:
+			case sid, ok := <-sidCh:
+				if !ok {
+					return
+				}
 				workConn, errRet := pxy.GetWorkConnFromPool(nil, nil)
 				if errRet != nil {
 					continue

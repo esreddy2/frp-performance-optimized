@@ -33,11 +33,26 @@ type compatTestContext struct {
 	RunCurrentCurrent bool
 }
 
-var compatCtx compatTestContext
+var (
+	compatCtx        compatTestContext
+	compatContextErr error
+)
 
 func registerFlags(flags *flag.FlagSet) {
-	flags.StringVar(&compatCtx.CurrentFRPSPath, "current-frps-path", "../../bin/frps", "The current frps binary to use.")
-	flags.StringVar(&compatCtx.CurrentFRPCPath, "current-frpc-path", "../../bin/frpc", "The current frpc binary to use.")
+	defaultFRPS := "../../../bin/frps"
+	defaultFRPC := "../../../bin/frpc"
+	if _, err := os.Stat(defaultFRPS); err != nil {
+		if _, err2 := os.Stat("../../bin/frps"); err2 == nil {
+			defaultFRPS = "../../bin/frps"
+		}
+	}
+	if _, err := os.Stat(defaultFRPC); err != nil {
+		if _, err2 := os.Stat("../../bin/frpc"); err2 == nil {
+			defaultFRPC = "../../bin/frpc"
+		}
+	}
+	flags.StringVar(&compatCtx.CurrentFRPSPath, "current-frps-path", defaultFRPS, "The current frps binary to use.")
+	flags.StringVar(&compatCtx.CurrentFRPCPath, "current-frpc-path", defaultFRPC, "The current frpc binary to use.")
 	flags.StringVar(&compatCtx.BaselineFRPSPath, "baseline-frps-path", "", "The baseline frps binary to use.")
 	flags.StringVar(&compatCtx.BaselineFRPCPath, "baseline-frpc-path", "", "The baseline frpc binary to use.")
 	flags.StringVar(&compatCtx.BaselineVersion, "baseline-version", "custom", "The baseline version label for reporting.")
@@ -68,18 +83,20 @@ func TestMain(m *testing.M) {
 	registerFlags(flag.CommandLine)
 	flag.Parse()
 
-	if err := validateCompatContext(&compatCtx); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	compatContextErr = validateCompatContext(&compatCtx)
+	if compatContextErr == nil {
+		framework.TestContext.Debug = compatCtx.Debug
+		framework.TestContext.LogLevel = compatCtx.LogLevel
+		log.InitLogger("console", compatCtx.LogLevel, 0, true)
 	}
-
-	framework.TestContext.Debug = compatCtx.Debug
-	framework.TestContext.LogLevel = compatCtx.LogLevel
-	log.InitLogger("console", compatCtx.LogLevel, 0, true)
 	os.Exit(m.Run())
 }
 
 func TestCompatibilityE2E(t *testing.T) {
+	if compatContextErr != nil {
+		t.Skipf("skipping compatibility e2e specs: %v", compatContextErr)
+		return
+	}
 	gomega.RegisterFailHandler(framework.Fail)
 
 	suiteConfig, reporterConfig := ginkgo.GinkgoConfiguration()

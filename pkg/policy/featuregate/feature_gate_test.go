@@ -86,14 +86,19 @@ func TestFeatureGateLifecycleAndInvariants(t *testing.T) {
 	}), "feature is locked to true")
 	require.True(t, fg.Enabled(lockedFeat))
 
-	// Closed featureGate rejects new Add calls.
-	rawFG, ok := fg.(*featureGate)
-	require.True(t, ok)
-	rawFG.lock.Lock()
-	rawFG.closed = true
-	rawFG.lock.Unlock()
+	// Closed/Frozen featureGate rejects new Add and SetFromMap calls.
+	fg.Close()
 	require.ErrorContains(t, fg.Add(map[Feature]FeatureSpec{
 		Feature("AfterClose"): {Default: false, Stage: Alpha},
+	}), "closed")
+	require.ErrorContains(t, fg.SetFromMap(map[string]bool{
+		string(alphaFeat): false,
+	}), "closed")
+
+	fg2 := NewFeatureGate()
+	fg2.Freeze()
+	require.ErrorContains(t, fg2.SetFromMap(map[string]bool{
+		string(VirtualNet): true,
 	}), "closed")
 }
 

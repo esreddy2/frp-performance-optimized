@@ -52,6 +52,23 @@ func EncodeUDPPacketBinary(packet *UDPPacket) ([]byte, error) {
 		return nil, fmt.Errorf("UDP payload length %d exceeds limit %d", len(packet.Content), MaxUDPPayloadSize)
 	}
 
+	payload, err := EncodeUDPPacketBinaryPayload(packet)
+	if err != nil {
+		return nil, err
+	}
+	return payload[2:], nil
+}
+
+// EncodeUDPPacketBinaryPayload encodes a V2 binary UDP packet directly into a contiguous
+// wire message payload slice prefixed with V2TypeUDPPacketBinary.
+func EncodeUDPPacketBinaryPayload(packet *UDPPacket) ([]byte, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("nil UDP packet")
+	}
+	if len(packet.Content) > MaxUDPPayloadSize {
+		return nil, fmt.Errorf("UDP payload length %d exceeds limit %d", len(packet.Content), MaxUDPPayloadSize)
+	}
+
 	var flags byte
 	var localAddr, remoteAddr binaryUDPAddr
 	bodyLen := 1 + 2 + len(packet.Content)
@@ -75,17 +92,18 @@ func EncodeUDPPacketBinary(packet *UDPPacket) ([]byte, error) {
 		return nil, fmt.Errorf("v2 frame payload length %d exceeds limit %d", 2+bodyLen, wire.DefaultMaxFramePayloadSize)
 	}
 
-	body := make([]byte, bodyLen)
-	body[0] = flags
-	offset := 1
+	payload := make([]byte, 2+bodyLen)
+	binary.BigEndian.PutUint16(payload[:2], V2TypeUDPPacketBinary)
+	payload[2] = flags
+	offset := 3
 	if flags&udpPacketFlagLocalAddr != 0 {
-		offset = putBinaryUDPAddr(body, offset, localAddr)
+		offset = putBinaryUDPAddr(payload, offset, localAddr)
 	}
-	offset = putBinaryUDPAddr(body, offset, remoteAddr)
-	binary.BigEndian.PutUint16(body[offset:offset+2], uint16(len(packet.Content)))
+	offset = putBinaryUDPAddr(payload, offset, remoteAddr)
+	binary.BigEndian.PutUint16(payload[offset:offset+2], uint16(len(packet.Content)))
 	offset += 2
-	copy(body[offset:], packet.Content)
-	return body, nil
+	copy(payload[offset:], packet.Content)
+	return payload, nil
 }
 
 // DecodeUDPPacketBinary decodes a V2 binary UDP packet body and returns data
@@ -273,13 +291,10 @@ func (rw *V2BinaryUDPPacketReadWriter) WriteMsg(message Message) error {
 		}
 		return rw.conn.WriteFrame(frame)
 	}
-	body, err := EncodeUDPPacketBinary(packet)
+	payload, err := EncodeUDPPacketBinaryPayload(packet)
 	if err != nil {
 		return err
 	}
-	payload := make([]byte, 2+len(body))
-	binary.BigEndian.PutUint16(payload[:2], V2TypeUDPPacketBinary)
-	copy(payload[2:], body)
 	return rw.conn.WriteFrame(&wire.Frame{Type: wire.FrameTypeMessage, Payload: payload})
 }
 

@@ -99,6 +99,9 @@ func (f *Framework) BeforeEach() {
 		default:
 		}
 	}
+	if udsPort := f.mockServers.UDSPort(); udsPort > 0 {
+		f.usedPorts[UDSEchoServerPort] = udsPort
+	}
 }
 
 func (f *Framework) AfterEach() {

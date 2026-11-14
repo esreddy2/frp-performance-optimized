@@ -97,7 +97,14 @@ func (impl *transporterImpl) DispatchWithType(m msg.Message, msgType, laneKey st
 }
 
 func (impl *transporterImpl) Dispatch(m msg.Message, laneKey string) bool {
-	msgType := reflect.TypeOf(m).Elem().Name()
+	if m == nil {
+		return false
+	}
+	t := reflect.TypeOf(m)
+	if t.Kind() != reflect.Pointer {
+		return false
+	}
+	msgType := t.Elem().Name()
 	return impl.DispatchWithType(m, msgType, laneKey)
 }
 

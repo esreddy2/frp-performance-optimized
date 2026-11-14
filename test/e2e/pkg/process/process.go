@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -47,6 +48,10 @@ type Process struct {
 func NewWithEnvs(path string, params []string, envs []string) *Process {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, path, params...)
+	setSysProcAttr(cmd)
+	cmd.Cancel = func() error {
+		return killProcessGroup(cmd, syscall.SIGKILL)
+	}
 	cmd.Env = envs
 	p := &Process{
 		cmd:    cmd,
@@ -95,8 +100,14 @@ func (p *Process) Stop() error {
 	defer func() {
 		p.stopped = true
 	}()
+	_ = killProcessGroup(p.cmd, syscall.SIGTERM)
 	p.cancel()
-	<-p.done
+	select {
+	case <-p.done:
+	case <-time.After(500 * time.Millisecond):
+		_ = killProcessGroup(p.cmd, syscall.SIGKILL)
+		<-p.done
+	}
 	return p.waitErr
 }
 

@@ -48,8 +48,12 @@ func NewTCPProxy(baseProxy *BaseProxy) Proxy {
 
 func (pxy *TCPProxy) Run() (remoteAddr string, err error) {
 	xl := pxy.xl
+	portName := pxy.name
+	if u := pxy.GetUserInfo().User; u != "" {
+		portName = u + ":" + pxy.name
+	}
 	if pxy.cfg.LoadBalancer.Group != "" {
-		l, realBindPort, errRet := pxy.rc.TCPGroupCtl.Listen(pxy.name, pxy.cfg.LoadBalancer.Group, pxy.cfg.LoadBalancer.GroupKey,
+		l, realBindPort, errRet := pxy.rc.TCPGroupCtl.Listen(portName, pxy.cfg.LoadBalancer.Group, pxy.cfg.LoadBalancer.GroupKey,
 			pxy.serverCfg.ProxyBindAddr, pxy.cfg.RemotePort)
 		if errRet != nil {
 			err = errRet
@@ -64,7 +68,11 @@ func (pxy *TCPProxy) Run() (remoteAddr string, err error) {
 		pxy.listeners = append(pxy.listeners, l)
 		xl.Infof("tcp proxy listen port [%d] in group [%s]", pxy.cfg.RemotePort, pxy.cfg.LoadBalancer.Group)
 	} else {
-		pxy.realBindPort, err = pxy.rc.TCPPortManager.Acquire(pxy.name, pxy.cfg.RemotePort)
+		portName := pxy.name
+		if u := pxy.GetUserInfo().User; u != "" {
+			portName = u + ":" + pxy.name
+		}
+		pxy.realBindPort, err = pxy.rc.TCPPortManager.Acquire(portName, pxy.cfg.RemotePort)
 		if err != nil {
 			return
 		}

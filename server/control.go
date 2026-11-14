@@ -24,6 +24,7 @@ import (
 	"math"
 	"net"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -630,12 +631,20 @@ func (ctl *Control) setHandoffBarrier(barrier <-chan struct{}) {
 	ctl.lifecycleMu.Unlock()
 }
 
+var handoffBarrierTimeout = 10 * time.Second
+
 func (ctl *Control) WaitForHandoff() {
 	ctl.lifecycleMu.Lock()
 	barrier := ctl.handoffBarrier
 	ctl.lifecycleMu.Unlock()
 	if barrier != nil {
-		<-barrier
+		select {
+		case <-barrier:
+		case <-time.After(handoffBarrierTimeout):
+			if ctl.xl != nil {
+				ctl.xl.Warnf("timeout waiting for predecessor control handoff barrier")
+			}
+		}
 	}
 }
 
@@ -970,7 +979,7 @@ func (ctl *Control) worker() {
 }
 
 func (ctl *Control) registerMsgHandlers() {
-	ctl.msgDispatcher.RegisterHandler(&msg.NewProxy{}, ctl.handleNewProxy)
+	ctl.msgDispatcher.RegisterAsyncHandler(&msg.NewProxy{}, ctl.handleNewProxy)
 	ctl.msgDispatcher.RegisterHandler(&msg.Ping{}, ctl.handlePing)
 	ctl.msgDispatcher.RegisterAsyncHandler(&msg.NatHoleVisitor{}, ctl.handleNatHoleVisitor)
 	ctl.msgDispatcher.RegisterAsyncHandler(&msg.NatHoleClient{}, ctl.handleNatHoleClient)
@@ -1185,6 +1194,13 @@ func (ctl *Control) RegisterProxy(
 	user plugin.UserInfo,
 	attemptID string,
 ) (remoteAddr string, err error) {
+	if ctl.sessionCtx.LoginMsg != nil && ctl.sessionCtx.LoginMsg.User != "" {
+		prefix := ctl.sessionCtx.LoginMsg.User + "."
+		if !strings.HasPrefix(pxyMsg.ProxyName, prefix) {
+			return remoteAddr, fmt.Errorf("proxy [%s] does not belong to user [%s] namespace", pxyMsg.ProxyName, ctl.sessionCtx.LoginMsg.User)
+		}
+	}
+
 	var pxyConf v1.ProxyConfigurer
 	// Load configures from NewProxy message and validate.
 	pxyConf, err = config.NewProxyConfigurerFromMsg(pxyMsg, ctl.sessionCtx.ServerCfg)
@@ -1212,6 +1228,11 @@ func (ctl *Control) RegisterProxy(
 		EncryptionKey:      ctl.sessionCtx.EncryptionKey,
 		WireProtocol:       ctl.sessionCtx.WireProtocol,
 		UDPPacketCodec:     ctl.sessionCtx.UDPPacketCodec,
+		CloseCallback: func(name string) {
+			go func() {
+				_ = ctl.CloseProxy(&msg.CloseProxy{ProxyName: name})
+			}()
+		},
 	}
 	pxy, err := proxy.NewProxy(ctl.ctx, opts)
 	if err != nil {

@@ -90,7 +90,14 @@ func (r *Routers) Del(domain, location, httpUser string) {
 			newVrs = append(newVrs, vr)
 		}
 	}
-	routersByHTTPUser[httpUser] = newVrs
+	if len(newVrs) == 0 {
+		delete(routersByHTTPUser, httpUser)
+		if len(routersByHTTPUser) == 0 {
+			delete(r.indexByDomain, domain)
+		}
+	} else {
+		routersByHTTPUser[httpUser] = newVrs
+	}
 }
 
 // Get returns the best location match for an exact host and exact HTTP user.

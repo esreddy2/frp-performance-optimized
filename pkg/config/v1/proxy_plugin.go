@@ -47,6 +47,11 @@ var clientPluginOptionsTypeMap = map[string]reflect.Type{
 	PluginVirtualNet:       reflect.TypeFor[VirtualNetPluginOptions](),
 }
 
+func IsValidClientPluginType(t string) bool {
+	_, ok := clientPluginOptionsTypeMap[t]
+	return ok
+}
+
 type ClientPluginOptions interface {
 	Complete()
 	Clone() ClientPluginOptions

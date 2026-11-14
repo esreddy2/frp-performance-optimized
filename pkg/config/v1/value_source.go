@@ -23,6 +23,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/fatedier/frp/pkg/policy/security"
 )
 
 const (
@@ -50,6 +52,8 @@ type ExecSource struct {
 	Command string       `json:"command"`
 	Args    []string     `json:"args,omitempty"`
 	Env     []ExecEnvVar `json:"env,omitempty"`
+
+	Policy *security.UnsafeFeatures `json:"-"`
 }
 
 type ExecEnvVar struct {
@@ -185,6 +189,17 @@ func (w *limitedOutputBuffer) Write(p []byte) (int, error) {
 func (e *ExecSource) Resolve(ctx context.Context) (string, error) {
 	if err := e.Validate(); err != nil {
 		return "", err
+	}
+
+	var policy *security.UnsafeFeatures
+	if ctx != nil {
+		policy = security.FromContext(ctx)
+	}
+	if policy == nil {
+		policy = e.Policy
+	}
+	if policy == nil || !policy.IsEnabled(security.TokenSourceExec) {
+		return "", fmt.Errorf("command execution is disabled by security policy: unsafe feature %q is not enabled", security.TokenSourceExec)
 	}
 
 	if ctx == nil {

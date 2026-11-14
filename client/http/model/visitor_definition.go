@@ -52,6 +52,23 @@ func (p *VisitorDefinition) ToConfigurer() (v1.VisitorConfigurer, error) {
 	return cfg, nil
 }
 
+func maskVisitorSecrets(cfg v1.VisitorConfigurer) {
+	switch c := cfg.(type) {
+	case *v1.STCPVisitorConfig:
+		if c.SecretKey != "" {
+			c.SecretKey = MaskedSecret
+		}
+	case *v1.SUDPVisitorConfig:
+		if c.SecretKey != "" {
+			c.SecretKey = MaskedSecret
+		}
+	case *v1.XTCPVisitorConfig:
+		if c.SecretKey != "" {
+			c.SecretKey = MaskedSecret
+		}
+	}
+}
+
 func VisitorDefinitionFromConfigurer(cfg v1.VisitorConfigurer) (VisitorDefinition, error) {
 	if cfg == nil {
 		return VisitorDefinition{}, fmt.Errorf("visitor config is nil")
@@ -65,11 +82,17 @@ func VisitorDefinitionFromConfigurer(cfg v1.VisitorConfigurer) (VisitorDefinitio
 
 	switch c := cfg.(type) {
 	case *v1.STCPVisitorConfig:
-		payload.STCP = c
+		cloned := c.Clone().(*v1.STCPVisitorConfig)
+		maskVisitorSecrets(cloned)
+		payload.STCP = cloned
 	case *v1.SUDPVisitorConfig:
-		payload.SUDP = c
+		cloned := c.Clone().(*v1.SUDPVisitorConfig)
+		maskVisitorSecrets(cloned)
+		payload.SUDP = cloned
 	case *v1.XTCPVisitorConfig:
-		payload.XTCP = c
+		cloned := c.Clone().(*v1.XTCPVisitorConfig)
+		maskVisitorSecrets(cloned)
+		payload.XTCP = cloned
 	default:
 		return VisitorDefinition{}, fmt.Errorf("unsupported visitor configurer type %T", cfg)
 	}

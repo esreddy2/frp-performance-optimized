@@ -116,7 +116,7 @@ func TestNewClientTLSConfigVerification(t *testing.T) {
 	cfg, err := NewClientTLSConfig("", "", "", "example.com")
 	require.NoError(t, err)
 	require.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
-	require.True(t, cfg.InsecureSkipVerify)
+	require.False(t, cfg.InsecureSkipVerify)
 	require.Nil(t, cfg.RootCAs)
 	cfg, err = NewClientTLSConfig("", "", caFile, "example.com")
 	require.NoError(t, err)

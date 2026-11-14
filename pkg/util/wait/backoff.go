@@ -123,11 +123,18 @@ func (f *fastBackoffImpl) Backoff(previousDuration time.Duration, previousCondit
 	return f.options.Duration
 }
 
+func clampBackoffDuration(d time.Duration) time.Duration {
+	if d < time.Millisecond {
+		return time.Millisecond
+	}
+	return d
+}
+
 func BackoffUntil(f func() (bool, error), backoff BackoffManager, sliding bool, stopCh <-chan struct{}) {
 	var delay time.Duration
 	previousError := false
 
-	ticker := time.NewTicker(backoff.Backoff(delay, previousError))
+	ticker := time.NewTicker(clampBackoffDuration(backoff.Backoff(delay, previousError)))
 	defer ticker.Stop()
 
 	for {
@@ -153,7 +160,7 @@ func BackoffUntil(f func() (bool, error), backoff BackoffManager, sliding bool, 
 			delay = backoff.Backoff(delay, previousError)
 		}
 
-		ticker.Reset(delay)
+		ticker.Reset(clampBackoffDuration(delay))
 		select {
 		case <-stopCh:
 			return

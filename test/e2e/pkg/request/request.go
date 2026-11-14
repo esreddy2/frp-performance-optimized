@@ -3,6 +3,7 @@ package request
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -201,7 +202,15 @@ func (r *Request) sendHTTPRequest(method, urlstr string, host string, headers ma
 	if len(body) != 0 {
 		inBody = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, urlstr, inBody)
+
+	timeout := 10 * time.Second
+	if r.timeout > 0 {
+		timeout = r.timeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, method, urlstr, inBody)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +240,10 @@ func (r *Request) sendHTTPRequest(method, urlstr string, host string, headers ma
 			return url.Parse(proxy)
 		}
 	}
-	client := http.Client{Transport: tr}
+	client := http.Client{
+		Transport: tr,
+		Timeout:   timeout,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

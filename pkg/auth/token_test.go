@@ -27,12 +27,16 @@ import (
 
 func TestTokenAuthReplayWindow(t *testing.T) {
 	fixedNow := time.Unix(1700000000, 0)
-	verifier := NewTokenAuth([]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns}, "secret-token")
-	verifier.now = func() time.Time { return fixedNow }
+	newVerifier := func() *TokenAuthSetterVerifier {
+		v := NewTokenAuth([]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns}, "secret-token")
+		v.now = func() time.Time { return fixedNow }
+		return v
+	}
 
 	maxSkew := int64(defaultAuthTimeout.Seconds())
 
 	t.Run("login within window", func(t *testing.T) {
+		verifier := newVerifier()
 		for _, ts := range []int64{fixedNow.Unix(), fixedNow.Unix() - maxSkew, fixedNow.Unix() + maxSkew} {
 			m := &msg.Login{Timestamp: ts}
 			require.NoError(t, verifier.SetLogin(m))
@@ -41,6 +45,7 @@ func TestTokenAuthReplayWindow(t *testing.T) {
 	})
 
 	t.Run("login outside window or zero", func(t *testing.T) {
+		verifier := newVerifier()
 		for _, ts := range []int64{0, -100, fixedNow.Unix() - maxSkew - 1, fixedNow.Unix() + maxSkew + 1} {
 			m := &msg.Login{
 				Timestamp:    ts,
@@ -52,6 +57,7 @@ func TestTokenAuthReplayWindow(t *testing.T) {
 	})
 
 	t.Run("login wrong token", func(t *testing.T) {
+		verifier := newVerifier()
 		m := &msg.Login{
 			Timestamp:    fixedNow.Unix(),
 			PrivilegeKey: util.GetAuthKey("wrong-token", fixedNow.Unix()),
@@ -61,6 +67,7 @@ func TestTokenAuthReplayWindow(t *testing.T) {
 	})
 
 	t.Run("SetLogin populates zero timestamp", func(t *testing.T) {
+		verifier := newVerifier()
 		m := &msg.Login{}
 		require.NoError(t, verifier.SetLogin(m))
 		require.Equal(t, fixedNow.Unix(), m.Timestamp)
@@ -68,6 +75,7 @@ func TestTokenAuthReplayWindow(t *testing.T) {
 	})
 
 	t.Run("ping replay window", func(t *testing.T) {
+		verifier := newVerifier()
 		m := &msg.Ping{}
 		require.NoError(t, verifier.SetPing(m))
 		require.NoError(t, verifier.VerifyPing(m))
@@ -80,6 +88,7 @@ func TestTokenAuthReplayWindow(t *testing.T) {
 	})
 
 	t.Run("newWorkConn replay window", func(t *testing.T) {
+		verifier := newVerifier()
 		m := &msg.NewWorkConn{}
 		require.NoError(t, verifier.SetNewWorkConn(m))
 		require.NoError(t, verifier.VerifyNewWorkConn(m))
@@ -92,6 +101,7 @@ func TestTokenAuthReplayWindow(t *testing.T) {
 	})
 
 	t.Run("nil messages", func(t *testing.T) {
+		verifier := newVerifier()
 		require.Error(t, verifier.SetLogin(nil))
 		require.Error(t, verifier.SetPing(nil))
 		require.Error(t, verifier.SetNewWorkConn(nil))
@@ -99,6 +109,56 @@ func TestTokenAuthReplayWindow(t *testing.T) {
 		require.Error(t, verifier.VerifyPing(nil))
 		require.Error(t, verifier.VerifyNewWorkConn(nil))
 	})
+}
+
+func TestTokenAuthReplayAttackPrevention(t *testing.T) {
+	fixedNow := time.Unix(1700000000, 0)
+	verifier := NewTokenAuth([]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns}, "secret-token")
+	verifier.now = func() time.Time { return fixedNow }
+
+	// 1. Login within the same second is allowed for legitimate concurrency,
+	// but replay when time advances must be rejected.
+	loginMsg := &msg.Login{Timestamp: fixedNow.Unix()}
+	require.NoError(t, verifier.SetLogin(loginMsg))
+	require.NoError(t, verifier.VerifyLogin(loginMsg))
+	// Concurrent in same second
+	require.NoError(t, verifier.VerifyLogin(loginMsg))
+
+	// Replay 10 seconds later
+	verifier.now = func() time.Time { return fixedNow.Add(10 * time.Second) }
+	err := verifier.VerifyLogin(loginMsg)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "token replay detected")
+	verifier.now = func() time.Time { return fixedNow }
+
+	// 2. Ping within the same second is allowed for legitimate concurrency,
+	// but replay when time advances must be rejected.
+	pingMsg := &msg.Ping{Timestamp: fixedNow.Unix()}
+	require.NoError(t, verifier.SetPing(pingMsg))
+	require.NoError(t, verifier.VerifyPing(pingMsg))
+	// Concurrent in same second
+	require.NoError(t, verifier.VerifyPing(pingMsg))
+
+	// Replay 10 seconds later
+	verifier.now = func() time.Time { return fixedNow.Add(10 * time.Second) }
+	err = verifier.VerifyPing(pingMsg)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "token replay detected")
+	verifier.now = func() time.Time { return fixedNow }
+
+	// 3. NewWorkConn within the same second is allowed for legitimate concurrency,
+	// but past work connection replay when time advances must be rejected.
+	workMsg := &msg.NewWorkConn{Timestamp: fixedNow.Unix()}
+	require.NoError(t, verifier.SetNewWorkConn(workMsg))
+	require.NoError(t, verifier.VerifyNewWorkConn(workMsg))
+	// Concurrent in same second
+	require.NoError(t, verifier.VerifyNewWorkConn(workMsg))
+
+	// Replay 10 seconds later
+	verifier.now = func() time.Time { return fixedNow.Add(10 * time.Second) }
+	err = verifier.VerifyNewWorkConn(workMsg)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "token replay detected")
 }
 
 func TestBuildClientServerAuthAndAlwaysPass(t *testing.T) {

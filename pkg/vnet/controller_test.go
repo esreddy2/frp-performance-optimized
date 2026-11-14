@@ -180,14 +180,20 @@ func TestControllerClientAndServerLoopsAndRouting(t *testing.T) {
 	require.NoError(t, err)
 	gotMsg, err := ReadMessage(clientPeer)
 	require.NoError(t, err)
-	require.Equal(t, v4ToClient, gotMsg)
+	v4Expected := make([]byte, len(v4ToClient))
+	copy(v4Expected, v4ToClient)
+	v4Expected[8]--
+	require.Equal(t, v4Expected, gotMsg)
 
 	v6ToClient := buildIPv6Packet(net.ParseIP("fd00::1"), net.ParseIP("fd20::2"), []byte("ping-v6"))
 	_, err = tunPeer.Write(v6ToClient)
 	require.NoError(t, err)
 	gotMsg, err = ReadMessage(clientPeer)
 	require.NoError(t, err)
-	require.Equal(t, v6ToClient, gotMsg)
+	v6Expected := make([]byte, len(v6ToClient))
+	copy(v6Expected, v6ToClient)
+	v6Expected[7]--
+	require.Equal(t, v6Expected, gotMsg)
 
 	// Also test handlePacket edge cases directly (empty, unknown version, truncated IPv4/IPv6, unroutable)
 	controller.handlePacket(nil)
@@ -262,7 +268,10 @@ func TestControllerClientAndServerLoopsAndRouting(t *testing.T) {
 	require.NoError(t, err)
 	gotReply, err := ReadMessage(serverPeer)
 	require.NoError(t, err)
-	require.Equal(t, replyToServerPeer, gotReply)
+	replyExpected := make([]byte, len(replyToServerPeer))
+	copy(replyExpected, replyToServerPeer)
+	replyExpected[8]--
+	require.Equal(t, replyExpected, gotReply)
 
 	// Closing serverPeer triggers cleanupConnIPs and onClose
 	_ = serverPeer.Close()

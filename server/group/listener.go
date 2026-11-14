@@ -3,24 +3,27 @@ package group
 import (
 	"net"
 	"sync"
+	"time"
 )
 
 // Listener is a per-proxy virtual listener that receives connections
 // from a shared group. It implements net.Listener.
 type Listener struct {
-	acceptCh <-chan net.Conn
-	addr     net.Addr
-	closeCh  chan struct{}
-	onClose  func(*Listener)
-	once     sync.Once
+	acceptCh    <-chan net.Conn
+	rawAcceptCh chan net.Conn
+	addr        net.Addr
+	closeCh     chan struct{}
+	onClose     func(*Listener)
+	once        sync.Once
 }
 
-func newListener(acceptCh <-chan net.Conn, addr net.Addr, onClose func(*Listener)) *Listener {
+func newListener(acceptCh chan net.Conn, addr net.Addr, onClose func(*Listener)) *Listener {
 	return &Listener{
-		acceptCh: acceptCh,
-		addr:     addr,
-		closeCh:  make(chan struct{}),
-		onClose:  onClose,
+		acceptCh:    acceptCh,
+		rawAcceptCh: acceptCh,
+		addr:        addr,
+		closeCh:     make(chan struct{}),
+		onClose:     onClose,
 	}
 }
 
@@ -28,11 +31,38 @@ func (ln *Listener) Accept() (net.Conn, error) {
 	select {
 	case <-ln.closeCh:
 		return nil, ErrListenerClosed
+	default:
+	}
+
+	select {
+	case <-ln.closeCh:
+		return nil, ErrListenerClosed
 	case c, ok := <-ln.acceptCh:
 		if !ok {
 			return nil, ErrListenerClosed
 		}
-		return c, nil
+		select {
+		case <-ln.closeCh:
+			if ln.rawAcceptCh != nil {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							_ = c.Close()
+						}
+					}()
+					select {
+					case ln.rawAcceptCh <- c:
+					case <-time.After(200 * time.Millisecond):
+						_ = c.Close()
+					}
+				}()
+			} else {
+				_ = c.Close()
+			}
+			return nil, ErrListenerClosed
+		default:
+			return c, nil
+		}
 	}
 }
 

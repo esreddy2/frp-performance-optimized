@@ -15,6 +15,7 @@
 package net
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -38,6 +39,9 @@ type FakeUDPConn struct {
 	remoteAddr net.Addr
 	packets    chan []byte
 	closeFlag  bool
+
+	unread []byte
+	readMu sync.Mutex
 
 	lastActive time.Time
 	mu         sync.RWMutex
@@ -109,14 +113,35 @@ func (c *FakeUDPConn) putPacket(content []byte) {
 }
 
 func (c *FakeUDPConn) Read(b []byte) (n int, err error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+
+	if len(c.unread) > 0 {
+		n = copy(b, c.unread)
+		c.unread = c.unread[n:]
+		if len(c.unread) == 0 {
+			c.unread = nil
+		}
+		c.touch()
+		return n, nil
+	}
+
 	content, ok := <-c.packets
 	if !ok {
 		return 0, io.EOF
 	}
 	c.touch()
 
-	n = min(len(b), len(content))
-	copy(b, content)
+	n = copy(b, content)
+	if n < len(content) {
+		remainder := make([]byte, len(content)-n)
+		copy(remainder, content[n:])
+		c.unread = remainder
+	}
 	pool.PutBuf(content)
 	return n, nil
 }
@@ -299,7 +324,10 @@ func ListenUDP(bindAddr string, bindPort int) (l *UDPListener, err error) {
 			if addr, ok := packet.RemoteAddr.(*net.UDPAddr); ok {
 				if _, err := readConn.WriteToUDP(packet.Buf, addr); err != nil {
 					pool.PutBuf(packet.Buf)
-					return
+					if errors.Is(err, net.ErrClosed) {
+						return
+					}
+					continue
 				}
 			}
 			pool.PutBuf(packet.Buf)

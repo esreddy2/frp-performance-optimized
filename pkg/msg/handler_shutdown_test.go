@@ -21,6 +21,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Preserve the original exported constructor function type.
@@ -160,5 +161,25 @@ func TestDispatcherWaitAsyncConcurrentDispatch(t *testing.T) {
 		_ = c2.Close()
 		writerWg.Wait()
 		regressionAwait(t, d.Done(), "dispatcher exit")
+	}
+}
+
+func TestDispatcherExportedStopAndQueueFullTimeout(t *testing.T) {
+	c := newRegressionControl(t)
+	d := NewDispatcher(c)
+	// Fill the 100-item sendCh
+	for range 100 {
+		d.sendCh <- &ReqWorkConn{}
+	}
+
+	// Verify Stop unblocks any blocked send
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		d.Stop()
+	}()
+
+	err := d.Send(&ReqWorkConn{})
+	if !errors.Is(err, io.EOF) && !errors.Is(err, ErrSendQueueFull) {
+		t.Fatalf("expected EOF or ErrSendQueueFull, got: %v", err)
 	}
 }

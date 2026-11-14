@@ -20,15 +20,34 @@ import (
 	"context"
 	"io"
 	"log"
+	"strings"
 
 	gosocks5 "github.com/armon/go-socks5"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	frplog "github.com/fatedier/frp/pkg/util/log"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
 func init() {
 	Register(v1.PluginSocks5, NewSocks5Plugin)
+}
+
+type safeSocks5RuleSet struct{}
+
+func (s *safeSocks5RuleSet) Allow(ctx context.Context, req *gosocks5.Request) (context.Context, bool) {
+	if req.DestAddr == nil {
+		return ctx, false
+	}
+	if req.DestAddr.IP != nil {
+		if req.DestAddr.IP.IsLinkLocalUnicast() || req.DestAddr.IP.IsLinkLocalMulticast() {
+			return ctx, false
+		}
+	}
+	if strings.EqualFold(req.DestAddr.FQDN, "instance-data") || strings.EqualFold(req.DestAddr.FQDN, "metadata.google.internal") {
+		return ctx, false
+	}
+	return ctx, true
 }
 
 type Socks5Plugin struct {
@@ -40,9 +59,12 @@ func NewSocks5Plugin(_ PluginContext, options v1.ClientPluginOptions) (p Plugin,
 
 	cfg := &gosocks5.Config{
 		Logger: log.New(io.Discard, "", log.LstdFlags),
+		Rules:  &safeSocks5RuleSet{},
 	}
 	if opts.Username != "" || opts.Password != "" {
 		cfg.Credentials = gosocks5.StaticCredentials(map[string]string{opts.Username: opts.Password})
+	} else {
+		frplog.Warnf("SOCKS5 plugin is running without authentication; proxy is open")
 	}
 	sp := &Socks5Plugin{}
 	sp.Server, err = gosocks5.New(cfg)

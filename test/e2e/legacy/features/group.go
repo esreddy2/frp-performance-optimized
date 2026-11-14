@@ -50,6 +50,7 @@ var _ = ginkgo.Describe("[Feature: Group]", func() {
 		}
 		for range 10 {
 			wait.Go(func() {
+				defer ginkgo.GinkgoRecover()
 				expectFn()
 			})
 		}
@@ -164,8 +165,23 @@ var _ = ginkgo.Describe("[Feature: Group]", func() {
 			}
 
 			// resume bar server, check foo and bar is ok
+			barServer = streamserver.New(streamserver.TCP, streamserver.WithBindPort(barPort), streamserver.WithRespContent([]byte("bar")))
 			f.RunServer("", barServer)
-			time.Sleep(2 * time.Second)
+			framework.Eventually(func() bool {
+				var hasFoo, hasBar bool
+				for range 10 {
+					resp, err := request.New().Port(remotePort).Do()
+					if err == nil {
+						if string(resp.Content) == "foo" {
+							hasFoo = true
+						}
+						if string(resp.Content) == "bar" {
+							hasBar = true
+						}
+					}
+				}
+				return hasFoo && hasBar
+			}, 5*time.Second, 100*time.Millisecond)
 			results = []string{}
 			for range 10 {
 				framework.NewRequestExpect(f).Port(remotePort).Ensure(validateFooBarResponse, func(resp *request.Response) bool {
@@ -244,14 +260,37 @@ var _ = ginkgo.Describe("[Feature: Group]", func() {
 
 			// close bar server, check foo is ok
 			barServer.Close()
-			time.Sleep(2 * time.Second)
+			framework.Eventually(func() bool {
+				for range 10 {
+					resp, err := request.New().Port(vhostPort).HTTP().HTTPHost("example.com").Do()
+					if err != nil || string(resp.Content) != "foo" {
+						return false
+					}
+				}
+				return true
+			}, 10*time.Second, 100*time.Millisecond)
 			results = doFooBarHTTPRequest(vhostPort, "example.com")
 			framework.ExpectContainElements(results, []string{"foo"})
 			framework.ExpectNotContainElements(results, []string{"bar"})
 
 			// resume bar server, check foo and bar is ok
+			barServer = newHTTPServer(barPort, "bar")
 			f.RunServer("", barServer)
-			time.Sleep(2 * time.Second)
+			framework.Eventually(func() bool {
+				var hasFoo, hasBar bool
+				for range 20 {
+					resp, err := request.New().Port(vhostPort).HTTP().HTTPHost("example.com").Do()
+					if err == nil {
+						if string(resp.Content) == "foo" {
+							hasFoo = true
+						}
+						if string(resp.Content) == "bar" {
+							hasBar = true
+						}
+					}
+				}
+				return hasFoo && hasBar
+			}, 10*time.Second, 100*time.Millisecond)
 			results = doFooBarHTTPRequest(vhostPort, "example.com")
 			framework.ExpectContainElements(results, []string{"foo", "bar"})
 		})

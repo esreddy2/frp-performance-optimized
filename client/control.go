@@ -33,6 +33,8 @@ import (
 	"github.com/fatedier/frp/pkg/vnet"
 )
 
+var workConnReadTimeout time.Duration
+
 type SessionContext struct {
 	// The client common configuration.
 	Common *v1.ClientCommonConfig
@@ -77,6 +79,10 @@ type Control struct {
 	cfgGen           atomic.Uint64
 	wg               sync.WaitGroup
 
+	workConnsMu     sync.Mutex
+	workConns       map[net.Conn]struct{}
+	workConnsClosed bool
+
 	// of time.Time, last time got the Pong message
 	lastPong atomic.Value
 
@@ -100,6 +106,7 @@ func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, erro
 		xl:         xlog.FromContextSafe(ctx),
 		sessionCtx: sessionCtx,
 		doneCh:     make(chan struct{}),
+		workConns:  make(map[net.Conn]struct{}),
 	}
 	ctl.lastPong.Store(time.Now())
 
@@ -141,6 +148,23 @@ func (ctl *Control) SetInWorkConnCallback(cb func(*v1.ProxyBaseConfig, net.Conn,
 	ctl.pm.SetInWorkConnCallback(cb)
 }
 
+func (ctl *Control) trackWorkConn(conn net.Conn) bool {
+	ctl.workConnsMu.Lock()
+	defer ctl.workConnsMu.Unlock()
+	if ctl.workConnsClosed {
+		_ = conn.Close()
+		return false
+	}
+	ctl.workConns[conn] = struct{}{}
+	return true
+}
+
+func (ctl *Control) untrackWorkConn(conn net.Conn) {
+	ctl.workConnsMu.Lock()
+	delete(ctl.workConns, conn)
+	ctl.workConnsMu.Unlock()
+}
+
 func (ctl *Control) handleReqWorkConn(_ msg.Message) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -153,6 +177,10 @@ func (ctl *Control) handleReqWorkConn(_ msg.Message) {
 		xl.Warnf("start new connection to server error: %v", err)
 		return
 	}
+	if !ctl.trackWorkConn(workConn) {
+		return
+	}
+	defer ctl.untrackWorkConn(workConn)
 
 	m := &msg.NewWorkConn{
 		RunID: ctl.sessionCtx.RunID,
@@ -167,12 +195,17 @@ func (ctl *Control) handleReqWorkConn(_ msg.Message) {
 		workConn.Close()
 		return
 	}
-
 	var startMsg msg.StartWorkConn
+	if workConnReadTimeout > 0 {
+		_ = workConn.SetReadDeadline(time.Now().Add(workConnReadTimeout))
+	}
 	if err = workConn.ReadMsgInto(&startMsg); err != nil {
 		xl.Tracef("work connection closed before response StartWorkConn message: %v", err)
 		workConn.Close()
 		return
+	}
+	if workConnReadTimeout > 0 {
+		_ = workConn.SetReadDeadline(time.Time{})
 	}
 	if startMsg.Error != "" {
 		xl.Errorf("StartWorkConn contains error: %s", startMsg.Error)
@@ -231,6 +264,14 @@ func (ctl *Control) closeSession() {
 		if xl == nil {
 			xl = xlog.FromContextSafe(ctl.ctx)
 		}
+		ctl.workConnsMu.Lock()
+		ctl.workConnsClosed = true
+		for conn := range ctl.workConns {
+			_ = conn.Close()
+		}
+		clear(ctl.workConns)
+		ctl.workConnsMu.Unlock()
+
 		if err := ctl.sessionCtx.Conn.Close(); err != nil {
 			xl.Warnf("close control connection error: %v", err)
 		}
@@ -378,7 +419,7 @@ func (ctl *Control) UpdateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorC
 	if ctl.cfgGen.Load() != gen {
 		return nil
 	}
-	ctl.vm.UpdateAll(visitorCfgs)
 	ctl.pm.UpdateAll(proxyCfgs)
+	ctl.vm.UpdateAll(visitorCfgs)
 	return nil
 }

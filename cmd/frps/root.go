@@ -18,7 +18,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -74,6 +76,7 @@ var rootCmd = &cobra.Command{
 				fmt.Printf("WARNING: ini format is deprecated and the support will be removed in the future, " +
 					"please use yaml/json/toml format instead!\n")
 			}
+			mergeServerConfigFlags(cmd, svrCfg, &serverCfg)
 		} else {
 			if err := serverCfg.Complete(); err != nil {
 				fmt.Printf("failed to complete server config: %v\n", err)
@@ -108,6 +111,86 @@ func Execute() {
 	}
 }
 
+func mergeServerConfigFlags(cmd *cobra.Command, dst, src *v1.ServerConfig) {
+	flags := cmd.PersistentFlags()
+	if flags.Changed("bind_addr") {
+		dst.BindAddr = src.BindAddr
+	}
+	if flags.Changed("bind_port") {
+		dst.BindPort = src.BindPort
+	}
+	if flags.Changed("kcp_bind_port") {
+		dst.KCPBindPort = src.KCPBindPort
+	}
+	if flags.Changed("quic_bind_port") {
+		dst.QUICBindPort = src.QUICBindPort
+	}
+	if flags.Changed("proxy_bind_addr") {
+		dst.ProxyBindAddr = src.ProxyBindAddr
+	}
+	if flags.Changed("vhost_http_port") {
+		dst.VhostHTTPPort = src.VhostHTTPPort
+	}
+	if flags.Changed("vhost_https_port") {
+		dst.VhostHTTPSPort = src.VhostHTTPSPort
+	}
+	if flags.Changed("vhost_http_timeout") {
+		dst.VhostHTTPTimeout = src.VhostHTTPTimeout
+	}
+	if flags.Changed("dashboard_addr") {
+		dst.WebServer.Addr = src.WebServer.Addr
+	}
+	if flags.Changed("dashboard_port") {
+		dst.WebServer.Port = src.WebServer.Port
+	}
+	if flags.Changed("dashboard_user") {
+		dst.WebServer.User = src.WebServer.User
+	}
+	if flags.Changed("dashboard_pwd") {
+		dst.WebServer.Password = src.WebServer.Password
+	}
+	if flags.Changed("enable_prometheus") {
+		dst.EnablePrometheus = src.EnablePrometheus
+	}
+	if flags.Changed("log_file") {
+		dst.Log.To = src.Log.To
+	}
+	if flags.Changed("log_level") {
+		dst.Log.Level = src.Log.Level
+	}
+	if flags.Changed("log_max_days") {
+		dst.Log.MaxDays = src.Log.MaxDays
+	}
+	if flags.Changed("disable_log_color") {
+		dst.Log.DisablePrintColor = src.Log.DisablePrintColor
+	}
+	if flags.Changed("token") {
+		dst.Auth.Token = src.Auth.Token
+	}
+	if flags.Changed("subdomain_host") {
+		dst.SubDomainHost = src.SubDomainHost
+	}
+	if flags.Changed("allow_ports") {
+		dst.AllowPorts = src.AllowPorts
+	}
+	if flags.Changed("max_ports_per_client") {
+		dst.MaxPortsPerClient = src.MaxPortsPerClient
+	}
+	if flags.Changed("tls_only") {
+		dst.Transport.TLS.Force = src.Transport.TLS.Force
+	}
+	if flags.Changed("dashboard_tls_mode") {
+		dst.WebServer.TLS = src.WebServer.TLS
+	}
+	if flags.Changed("dashboard_tls_cert_file") && dst.WebServer.TLS != nil && src.WebServer.TLS != nil {
+		dst.WebServer.TLS.CertFile = src.WebServer.TLS.CertFile
+	}
+	if flags.Changed("dashboard_tls_key_file") && dst.WebServer.TLS != nil && src.WebServer.TLS != nil {
+		dst.WebServer.TLS.KeyFile = src.WebServer.TLS.KeyFile
+	}
+	_ = dst.Complete()
+}
+
 func runServer(cfg *v1.ServerConfig) (err error) {
 	log.InitLogger(cfg.Log.To, cfg.Log.Level, int(cfg.Log.MaxDays), cfg.Log.DisablePrintColor)
 
@@ -122,6 +205,8 @@ func runServer(cfg *v1.ServerConfig) (err error) {
 		return err
 	}
 	log.Infof("frps started successfully")
-	svr.Run(context.Background())
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	svr.Run(ctx)
 	return
 }

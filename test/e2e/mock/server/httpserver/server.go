@@ -40,7 +40,9 @@ func WithBindPort(port int) Option {
 
 func WithTLSConfig(tlsConfig *tls.Config) Option {
 	return func(s *Server) *Server {
-		s.tlsConfig = tlsConfig
+		if tlsConfig != nil {
+			s.tlsConfig = tlsConfig.Clone()
+		}
 		return s
 	}
 }
@@ -67,10 +69,14 @@ func (s *Server) Run() error {
 	}
 
 	addr := net.JoinHostPort(s.bindAddr, strconv.Itoa(s.bindPort))
+	var tlsConf *tls.Config
+	if s.tlsConfig != nil {
+		tlsConf = s.tlsConfig.Clone()
+	}
 	hs := &http.Server{
 		Addr:              addr,
 		Handler:           s.handler,
-		TLSConfig:         s.tlsConfig,
+		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: time.Minute,
 	}
 

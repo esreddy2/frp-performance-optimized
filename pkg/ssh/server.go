@@ -115,8 +115,28 @@ func (s *TunnelServer) Run() error {
 		s.writeToClient(fmt.Sprintf("failed to complete client config: %v", err))
 		return fmt.Errorf("complete client config error: %v", err)
 	}
-	if sshConn.Permissions != nil {
-		clientCfg.User = util.EmptyOr(sshConn.Permissions.Extensions["user"], clientCfg.User)
+	if sshConn.Permissions != nil && sshConn.Permissions.Extensions != nil {
+		authKeyUser := sshConn.Permissions.Extensions["user"]
+		if authKeyUser != "" {
+			if clientCfg.User != "" && clientCfg.User != authKeyUser {
+				s.writeToClient(fmt.Sprintf("cannot override authenticated user %q with %q", authKeyUser, clientCfg.User))
+				return fmt.Errorf("user override not allowed: authenticated as %q, got --user %q", authKeyUser, clientCfg.User)
+			}
+			clientCfg.User = authKeyUser
+		} else {
+			anonID, err := util.RandIDWithLen(8)
+			if err != nil {
+				return err
+			}
+			clientCfg.User = "anon-" + anonID
+		}
+	} else if s.sc.NoClientAuth {
+		if clientCfg.User != "" {
+			s.writeToClient("cannot specify --user when ssh client authentication is disabled")
+			return fmt.Errorf("unauthenticated client attempted user impersonation with --user %q", clientCfg.User)
+		}
+		// When no client authentication is configured and no user is claimed,
+		// leave clientCfg.User empty so proxies remain unnamespaced and reachable.
 	}
 	pc.Complete()
 
@@ -225,10 +245,8 @@ func (s *TunnelServer) waitForwardAddrAndExtraPayload(
 ) (*tcpipForward, string, error) {
 	addrCh := make(chan *tcpipForward, 1)
 	extraPayloadCh := make(chan string, 1)
-	done := make(chan struct{})
-	defer close(done)
 
-	// get forward address
+	// get forward address and continuously drain requests
 	go func() {
 		addrGot := false
 		for {
@@ -245,20 +263,20 @@ func (s *TunnelServer) waitForwardAddrAndExtraPayload(
 					addrGot = true
 					select {
 					case addrCh <- &payload:
-					case <-done:
+					case <-s.doneCh:
 						return
 					}
 				}
 				if req.WantReply {
 					_ = req.Reply(true, nil)
 				}
-			case <-done:
+			case <-s.doneCh:
 				return
 			}
 		}
 	}()
 
-	// get extra payload
+	// get extra payload and continuously handle channels
 	go func() {
 		for {
 			select {
@@ -268,7 +286,7 @@ func (s *TunnelServer) waitForwardAddrAndExtraPayload(
 				}
 				// extraPayload will send to extraPayloadCh
 				go s.handleNewChannel(newChannel, extraPayloadCh)
-			case <-done:
+			case <-s.doneCh:
 				return
 			}
 		}

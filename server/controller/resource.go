@@ -86,6 +86,9 @@ func (rc *ResourceController) Close() error {
 			errs = append(errs, err)
 		}
 	}
+	if rc.HTTPReverseProxy != nil {
+		rc.HTTPReverseProxy.Close()
+	}
 
 	if rc.VisitorManager != nil {
 		if err := rc.VisitorManager.Close(); err != nil {

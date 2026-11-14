@@ -3,9 +3,11 @@ package group
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/vhost"
 )
 
@@ -23,12 +25,17 @@ func NewHTTPGroupController(vhostRouter *vhost.Routers) *HTTPGroupController {
 	}
 }
 
+func httpGroupKey(group, domain, location, routeByHTTPUser string) string {
+	return group + ":" + domain + ":" + location + ":" + routeByHTTPUser
+}
+
 func (ctl *HTTPGroupController) Register(
 	proxyName, group, groupKey string,
 	routeConfig vhost.RouteConfig,
 ) error {
+	key := httpGroupKey(group, routeConfig.Domain, routeConfig.Location, routeConfig.RouteByHTTPUser)
 	for {
-		g := ctl.getOrCreate(group, func() *HTTPGroup {
+		g := ctl.getOrCreate(key, func() *HTTPGroup {
 			return NewHTTPGroup(ctl)
 		})
 		err := g.Register(proxyName, group, groupKey, routeConfig)
@@ -39,12 +46,27 @@ func (ctl *HTTPGroupController) Register(
 	}
 }
 
-func (ctl *HTTPGroupController) UnRegister(proxyName, group string, _ vhost.RouteConfig) {
-	g, ok := ctl.get(group)
+func (ctl *HTTPGroupController) UnRegister(proxyName, group string, routeConfig vhost.RouteConfig) {
+	key := httpGroupKey(group, routeConfig.Domain, routeConfig.Location, routeConfig.RouteByHTTPUser)
+	g, ok := ctl.get(key)
 	if !ok {
 		return
 	}
 	g.UnRegister(proxyName)
+}
+
+func (ctl *HTTPGroupController) get(key string) (*HTTPGroup, bool) {
+	if g, ok := ctl.groupRegistry.get(key); ok {
+		return g, true
+	}
+	ctl.mu.RLock()
+	defer ctl.mu.RUnlock()
+	for k, g := range ctl.groups {
+		if k == key || strings.HasPrefix(k, key+":") {
+			return g, true
+		}
+	}
+	return nil, false
 }
 
 type HTTPGroup struct {
@@ -76,10 +98,11 @@ func (g *HTTPGroup) Register(
 ) (err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.ctl.isCurrent(group, func(cur *HTTPGroup) bool { return cur == g }) {
-		return errGroupStale
-	}
+	key := httpGroupKey(group, routeConfig.Domain, routeConfig.Location, routeConfig.RouteByHTTPUser)
 	if len(g.createFuncs) == 0 {
+		if !g.ctl.isCurrent(key, func(cur *HTTPGroup) bool { return cur == g }) {
+			return errGroupStale
+		}
 		// the first proxy in this group
 		tmp := routeConfig // copy object
 		tmp.CreateConnFn = g.createConn
@@ -101,7 +124,10 @@ func (g *HTTPGroup) Register(
 			err = ErrGroupParamsInvalid
 			return
 		}
-		if g.groupKey != groupKey {
+		if !g.ctl.isCurrent(key, func(cur *HTTPGroup) bool { return cur == g }) {
+			return errGroupStale
+		}
+		if !util.ConstantTimeEqString(g.groupKey, groupKey) {
 			err = ErrGroupAuthFailed
 			return
 		}
@@ -128,7 +154,8 @@ func (g *HTTPGroup) UnRegister(proxyName string) {
 
 	if len(g.createFuncs) == 0 {
 		g.ctl.vhostRouter.Del(g.domain, g.location, g.routeByHTTPUser)
-		g.ctl.removeIf(g.group, func(cur *HTTPGroup) bool {
+		key := httpGroupKey(g.group, g.domain, g.location, g.routeByHTTPUser)
+		g.ctl.removeIf(key, func(cur *HTTPGroup) bool {
 			return cur == g
 		})
 	}

@@ -2,6 +2,7 @@ package net
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -93,6 +94,7 @@ func NewWebsocketListener(ln net.Listener) (wl *WebsocketListener) {
 	}
 
 	go func() {
+		defer wl.closeOnce.Do(func() { close(wl.done) })
 		if err := wl.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			wl.mu.Lock()
 			wl.serveErr = err
@@ -105,6 +107,12 @@ func NewWebsocketListener(ln net.Listener) (wl *WebsocketListener) {
 func (p *WebsocketListener) Accept() (net.Conn, error) {
 	select {
 	case <-p.done:
+		p.mu.Lock()
+		se := p.serveErr
+		p.mu.Unlock()
+		if se != nil && !errors.Is(se, http.ErrServerClosed) {
+			return nil, fmt.Errorf("%w: %v", ErrWebsocketListenerClosed, se)
+		}
 		return nil, ErrWebsocketListenerClosed
 	case c := <-p.acceptCh:
 		p.mu.Lock()
@@ -113,6 +121,12 @@ func (p *WebsocketListener) Accept() (net.Conn, error) {
 		select {
 		case <-p.done:
 			c.Close()
+			p.mu.Lock()
+			se := p.serveErr
+			p.mu.Unlock()
+			if se != nil && !errors.Is(se, http.ErrServerClosed) {
+				return nil, fmt.Errorf("%w: %v", ErrWebsocketListenerClosed, se)
+			}
 			return nil, ErrWebsocketListenerClosed
 		default:
 		}

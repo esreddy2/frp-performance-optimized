@@ -155,6 +155,7 @@ func (pw *Wrapper) SetRunningStatus(remoteAddr string, respErr string) error {
 	}
 
 	if err := pw.pxy.Run(); err != nil {
+		pw.pxy.Close()
 		pw.close()
 		pw.Phase = ProxyPhaseStartErr
 		pw.Err = err.Error()
@@ -233,16 +234,19 @@ func (pw *Wrapper) checkWorker() {
 				pw.Cfg.MarshalToMsg(&newProxyMsg)
 				newProxyMsg.ProxyName = pw.wireName
 				pw.lastSendStartMsg = now
+				if !pw.closeChClosed && pw.Phase != ProxyPhaseClosed {
+					_ = pw.handler(&event.StartProxyPayload{
+						NewProxyMsg: &newProxyMsg,
+					})
+				}
 				pw.mu.Unlock()
-				_ = pw.handler(&event.StartProxyPayload{
-					NewProxyMsg: &newProxyMsg,
-				})
 			} else {
 				pw.mu.Unlock()
 			}
 		} else {
 			pw.mu.Lock()
 			if pw.Phase == ProxyPhaseRunning || pw.Phase == ProxyPhaseWaitStart {
+				pw.pxy.Close()
 				pw.close()
 				xl.Tracef("change status from [%s] to [%s]", pw.Phase, ProxyPhaseCheckFailed)
 				pw.Phase = ProxyPhaseCheckFailed

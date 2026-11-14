@@ -35,7 +35,11 @@ func DialHookWebsocket(protocol string, host string) libnet.AfterHookFunc {
 			return nil, nil, err
 		}
 
-		origin := "http://" + uri.Host
+		originScheme := "http://"
+		if protocol == "wss" {
+			originScheme = "https://"
+		}
+		origin := originScheme + uri.Host
 		cfg, err := websocket.NewConfig(addr, origin)
 		if err != nil {
 			return nil, nil, err

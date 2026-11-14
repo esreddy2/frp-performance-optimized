@@ -123,3 +123,28 @@ func TestManagerAuthAllowUsersEncryptionCompressionAndLifecycle(t *testing.T) {
 	_, err = ln2.Accept()
 	require.Error(err)
 }
+
+func TestManagerTimestampFreshness(t *testing.T) {
+	require := require.New(t)
+	vm := NewManager()
+
+	ln, err := vm.Listen("fresh-svc", "secret", []string{"*"})
+	require.NoError(err)
+	defer ln.Close()
+
+	c1, s1 := net.Pipe()
+	defer c1.Close()
+	defer s1.Close()
+
+	// Timestamp 120 seconds in the past
+	oldTime := time.Now().Unix() - 120
+	oldSign := util.GetAuthKey("secret", oldTime)
+	err = vm.NewConn("fresh-svc", s1, oldTime, oldSign, false, false, "alice", wire.ProtocolV1)
+	require.ErrorContains(err, "timestamp expired")
+
+	// Timestamp 120 seconds in the future
+	futureTime := time.Now().Unix() + 120
+	futureSign := util.GetAuthKey("secret", futureTime)
+	err = vm.NewConn("fresh-svc", s1, futureTime, futureSign, false, false, "alice", wire.ProtocolV1)
+	require.ErrorContains(err, "timestamp expired")
+}

@@ -43,3 +43,20 @@ func TestAuthClientConfig_Complete(t *testing.T) {
 	require.NoError(err)
 	require.EqualValues("token", cfg.Method)
 }
+
+func TestClientTransportConfig_HTTPProxyFallback(t *testing.T) {
+	require := require.New(t)
+
+	// When only HTTP_PROXY (uppercase) is set
+	t.Setenv("http_proxy", "")
+	t.Setenv("HTTP_PROXY", "http://uppercase-proxy:8080")
+	c := &ClientTransportConfig{}
+	c.Complete()
+	require.Equal("http://uppercase-proxy:8080", c.ProxyURL)
+
+	// When lowercase http_proxy is set, it takes precedence
+	t.Setenv("http_proxy", "http://lowercase-proxy:8080")
+	c2 := &ClientTransportConfig{}
+	c2.Complete()
+	require.Equal("http://lowercase-proxy:8080", c2.ProxyURL)
+}

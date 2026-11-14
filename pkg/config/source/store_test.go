@@ -238,3 +238,44 @@ func TestStoreSource_DirectoryPermissions(t *testing.T) {
 	require.NoError(err)
 	require.Equal(os.FileMode(0o700), info.Mode().Perm())
 }
+
+func TestStoreSource_ReturnsDeepClones(t *testing.T) {
+	require := require.New(t)
+
+	storeSource := newTestStoreSource(t)
+	proxyCfg := mockProxy("proxy-clone")
+	visitorCfg := mockVisitor("visitor-clone")
+
+	require.NoError(storeSource.AddProxy(proxyCfg))
+	require.NoError(storeSource.AddVisitor(visitorCfg))
+
+	// 1. Mutating GetProxy does not mutate stored proxy
+	p1 := storeSource.GetProxy("proxy-clone")
+	require.NotNil(p1)
+	p1.GetBaseConfig().LocalIP = "mutated-ip"
+	p2 := storeSource.GetProxy("proxy-clone")
+	require.NotEqual("mutated-ip", p2.GetBaseConfig().LocalIP)
+
+	// 2. Mutating GetAllProxies does not mutate stored proxy
+	allP, err := storeSource.GetAllProxies()
+	require.NoError(err)
+	require.Len(allP, 1)
+	allP[0].GetBaseConfig().LocalIP = "mutated-in-all"
+	p3 := storeSource.GetProxy("proxy-clone")
+	require.NotEqual("mutated-in-all", p3.GetBaseConfig().LocalIP)
+
+	// 3. Mutating GetVisitor does not mutate stored visitor
+	v1 := storeSource.GetVisitor("visitor-clone")
+	require.NotNil(v1)
+	v1.GetBaseConfig().BindAddr = "mutated-addr"
+	v2 := storeSource.GetVisitor("visitor-clone")
+	require.NotEqual("mutated-addr", v2.GetBaseConfig().BindAddr)
+
+	// 4. Mutating GetAllVisitors does not mutate stored visitor
+	allV, err := storeSource.GetAllVisitors()
+	require.NoError(err)
+	require.Len(allV, 1)
+	allV[0].GetBaseConfig().BindAddr = "mutated-in-all"
+	v3 := storeSource.GetVisitor("visitor-clone")
+	require.NotEqual("mutated-in-all", v3.GetBaseConfig().BindAddr)
+}

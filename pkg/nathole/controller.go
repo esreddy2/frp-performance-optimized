@@ -38,6 +38,8 @@ import (
 // NatHoleTimeout seconds.
 var NatHoleTimeout int64 = 10
 
+var sendSidTimeout = 5 * time.Second
+
 func NewTransactionID() string {
 	id, _ := util.RandID()
 	return fmt.Sprintf("%d%s", time.Now().Unix(), id)
@@ -199,15 +201,27 @@ func (c *Controller) HandleVisitor(m *msg.NatHoleVisitor, transporter transport.
 	}
 	log.Tracef("handle visitor message, sid [%s], server name: %s", sid, m.ProxyName)
 
-	defer func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		delete(c.sessions, sid)
-	}()
+	cleanedUp := false
+	cleanupSession := func() {
+		if !cleanedUp {
+			cleanedUp = true
+			c.mu.Lock()
+			delete(c.sessions, sid)
+			c.mu.Unlock()
+		}
+	}
 
+	var sent bool
 	if err := errors.PanicToError(func() {
-		clientCfg.sidCh <- sid
-	}); err != nil {
+		select {
+		case clientCfg.sidCh <- sid:
+			sent = true
+		case <-time.After(sendSidTimeout):
+			log.Warnf("send sid to clientCfg.sidCh timeout, sid [%s]", sid)
+		}
+	}); err != nil || !sent {
+		cleanupSession()
+		_ = transporter.Send(c.GenNatHoleResponse(m.TransactionID, nil, "send sid to client failed"))
 		return
 	}
 
@@ -216,6 +230,7 @@ func (c *Controller) HandleVisitor(m *msg.NatHoleVisitor, transporter transport.
 	case <-session.notifyCh:
 	case <-time.After(time.Duration(NatHoleTimeout) * time.Second):
 		log.Debugf("wait for NatHoleClient message timeout, sid [%s]", sid)
+		cleanupSession()
 		return
 	}
 
@@ -249,7 +264,10 @@ func (c *Controller) HandleVisitor(m *msg.NatHoleVisitor, transporter transport.
 	})
 	_ = g.Wait()
 
-	time.Sleep(time.Duration(cResp.DetectBehavior.ReadTimeoutMs+30000) * time.Millisecond)
+	retainDuration := time.Duration(cResp.DetectBehavior.ReadTimeoutMs+30000) * time.Millisecond
+	time.AfterFunc(retainDuration, func() {
+		cleanupSession()
+	})
 }
 
 func (c *Controller) HandleClient(m *msg.NatHoleClient, transporter transport.MessageTransporter) {

@@ -15,8 +15,10 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
@@ -30,6 +32,9 @@ type TokenAuthSetterVerifier struct {
 	additionalAuthScopes []v1.AuthScope
 	token                string
 	now                  func() time.Time
+
+	mu         sync.Mutex
+	seenTokens map[string]int64
 }
 
 func NewTokenAuth(additionalAuthScopes []v1.AuthScope, token string) *TokenAuthSetterVerifier {
@@ -37,6 +42,7 @@ func NewTokenAuth(additionalAuthScopes []v1.AuthScope, token string) *TokenAuthS
 		additionalAuthScopes: additionalAuthScopes,
 		token:                token,
 		now:                  time.Now,
+		seenTokens:           make(map[string]int64),
 	}
 }
 
@@ -52,6 +58,35 @@ func (auth *TokenAuthSetterVerifier) verifyTimestamp(timestamp int64) error {
 	maxSkew := int64(defaultAuthTimeout.Seconds())
 	if timestamp <= 0 || timestamp < now-maxSkew || timestamp > now+maxSkew {
 		return fmt.Errorf("authentication timestamp expired or out of window")
+	}
+	return nil
+}
+
+func (auth *TokenAuthSetterVerifier) checkAndRecordReplay(key string, allowConcurrentSec bool) error {
+	auth.mu.Lock()
+	defer auth.mu.Unlock()
+
+	now := auth.currentTime().Unix()
+	maxSkew := int64(defaultAuthTimeout.Seconds())
+
+	// Periodically prune stale entries outside the allowable skew window.
+	if len(auth.seenTokens) > 1000 {
+		for k, seenAt := range auth.seenTokens {
+			if seenAt < now-maxSkew || seenAt > now+maxSkew {
+				delete(auth.seenTokens, k)
+			}
+		}
+	}
+
+	if seenAt, exists := auth.seenTokens[key]; exists {
+		if !allowConcurrentSec || now > seenAt+1 {
+			return fmt.Errorf("token replay detected: authentication message has already been processed")
+		}
+	} else {
+		if auth.seenTokens == nil {
+			auth.seenTokens = make(map[string]int64)
+		}
+		auth.seenTokens[key] = now
 	}
 	return nil
 }
@@ -97,13 +132,14 @@ func (auth *TokenAuthSetterVerifier) VerifyLogin(m *msg.Login) error {
 	if m == nil {
 		return fmt.Errorf("login message is nil")
 	}
-	if !util.ConstantTimeEqString(util.GetAuthKey(auth.token, m.Timestamp), m.PrivilegeKey) {
-		return fmt.Errorf("token in login doesn't match token from configuration")
-	}
 	if err := auth.verifyTimestamp(m.Timestamp); err != nil {
 		return err
 	}
-	return nil
+	if subtle.ConstantTimeCompare([]byte(util.GetAuthKey(auth.token, m.Timestamp)), []byte(m.PrivilegeKey)) != 1 {
+		return fmt.Errorf("token in login doesn't match token from configuration")
+	}
+	key := fmt.Sprintf("login:%d:%s", m.Timestamp, m.PrivilegeKey)
+	return auth.checkAndRecordReplay(key, true)
 }
 
 func (auth *TokenAuthSetterVerifier) VerifyPing(m *msg.Ping) error {
@@ -114,13 +150,14 @@ func (auth *TokenAuthSetterVerifier) VerifyPing(m *msg.Ping) error {
 		return fmt.Errorf("ping message is nil")
 	}
 
-	if !util.ConstantTimeEqString(util.GetAuthKey(auth.token, m.Timestamp), m.PrivilegeKey) {
-		return fmt.Errorf("token in heartbeat doesn't match token from configuration")
-	}
 	if err := auth.verifyTimestamp(m.Timestamp); err != nil {
 		return err
 	}
-	return nil
+	if subtle.ConstantTimeCompare([]byte(util.GetAuthKey(auth.token, m.Timestamp)), []byte(m.PrivilegeKey)) != 1 {
+		return fmt.Errorf("token in heartbeat doesn't match token from configuration")
+	}
+	key := fmt.Sprintf("ping:%d:%s", m.Timestamp, m.PrivilegeKey)
+	return auth.checkAndRecordReplay(key, true)
 }
 
 func (auth *TokenAuthSetterVerifier) VerifyNewWorkConn(m *msg.NewWorkConn) error {
@@ -131,11 +168,12 @@ func (auth *TokenAuthSetterVerifier) VerifyNewWorkConn(m *msg.NewWorkConn) error
 		return fmt.Errorf("newWorkConn message is nil")
 	}
 
-	if !util.ConstantTimeEqString(util.GetAuthKey(auth.token, m.Timestamp), m.PrivilegeKey) {
-		return fmt.Errorf("token in NewWorkConn doesn't match token from configuration")
-	}
 	if err := auth.verifyTimestamp(m.Timestamp); err != nil {
 		return err
 	}
-	return nil
+	if subtle.ConstantTimeCompare([]byte(util.GetAuthKey(auth.token, m.Timestamp)), []byte(m.PrivilegeKey)) != 1 {
+		return fmt.Errorf("token in NewWorkConn doesn't match token from configuration")
+	}
+	key := fmt.Sprintf("workconn:%d:%s", m.Timestamp, m.PrivilegeKey)
+	return auth.checkAndRecordReplay(key, true)
 }

@@ -216,10 +216,16 @@ func (cr *ClientRegistry) GetByKey(key string) (ClientInfo, bool) {
 	}
 
 	info, ok := cr.clients[key]
-	if !ok {
-		return ClientInfo{}, false
+	if ok {
+		return *info, true
 	}
-	return *info, true
+	for _, client := range cr.clients {
+		if (client.User != "" && client.User+"."+client.ClientID() == key) ||
+			(client.User == "" && client.ClientID() == key) {
+			return *client, true
+		}
+	}
+	return ClientInfo{}, false
 }
 
 // ClientID returns the resolved client identifier for external use.
@@ -237,7 +243,7 @@ func (cr *ClientRegistry) composeClientKey(user, id string) string {
 	case id == "":
 		return user
 	default:
-		return fmt.Sprintf("%s.%s", user, id)
+		return fmt.Sprintf("%d:%s/%s", len(user), user, id)
 	}
 }
 

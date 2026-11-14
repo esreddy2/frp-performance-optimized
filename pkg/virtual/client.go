@@ -98,7 +98,7 @@ func (pc *pipeConnector) Open() error {
 }
 
 func (pc *pipeConnector) Connect() (net.Conn, error) {
-	c1, c2 := net.Pipe()
+	c1, c2 := NewBufferedPipe(64)
 	if err := pc.peerListener.PutConn(c1); err != nil {
 		c1.Close()
 		c2.Close()

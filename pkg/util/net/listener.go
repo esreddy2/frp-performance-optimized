@@ -15,10 +15,13 @@
 package net
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sync"
 )
+
+var ErrInternalListenerQueueFull = errors.New("put conn error: listener accept queue is full")
 
 // InternalListener is a listener that can be used to accept connections from
 // other goroutines.
@@ -62,7 +65,7 @@ func (l *InternalListener) PutConn(conn net.Conn) error {
 		return fmt.Errorf("put conn error: listener is closed")
 	default:
 		conn.Close()
-		return nil
+		return ErrInternalListenerQueueFull
 	}
 }
 

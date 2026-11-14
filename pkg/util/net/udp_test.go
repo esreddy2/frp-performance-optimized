@@ -134,3 +134,80 @@ func TestUDPListenerAndFakeUDPConnLifecycle(t *testing.T) {
 	require.Error(t, err)
 	require.Error(t, ln.WriteMsg([]byte("closed"), client1Addr))
 }
+
+func TestFakeUDPConnReadPreservesUnreadBytes(t *testing.T) {
+	fc := NewFakeUDPConn(nil, &net.UDPAddr{}, &net.UDPAddr{})
+	defer fc.Close()
+
+	payload1 := []byte("0123456789ABCDE")
+	buf1 := pool.GetBuf(len(payload1))
+	copy(buf1, payload1)
+	fc.putPacket(buf1)
+
+	readBuf := make([]byte, 5)
+	n, err := fc.Read(readBuf)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, "01234", string(readBuf[:n]))
+
+	n, err = fc.Read(readBuf)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, "56789", string(readBuf[:n]))
+
+	n, err = fc.Read(readBuf)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, "ABCDE", string(readBuf[:n]))
+
+	// Second packet read with larger buffer than remainder
+	payload2 := []byte("XYZ1234")
+	buf2 := pool.GetBuf(len(payload2))
+	copy(buf2, payload2)
+	fc.putPacket(buf2)
+
+	n, err = fc.Read(readBuf[:4])
+	require.NoError(t, err)
+	require.Equal(t, 4, n)
+	require.Equal(t, "XYZ1", string(readBuf[:n]))
+
+	largeBuf := make([]byte, 20)
+	n, err = fc.Read(largeBuf)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "234", string(largeBuf[:n]))
+}
+
+func TestUDPListenerWriteLoopRecoversFromTransientError(t *testing.T) {
+	ln, err := ListenUDP("127.0.0.1", 0)
+	require.NoError(t, err)
+	defer ln.Close()
+
+	listenUDPAddr := ln.Addr().(*net.UDPAddr)
+
+	client, err := net.DialUDP("udp", nil, listenUDPAddr)
+	require.NoError(t, err)
+	defer client.Close()
+
+	clientAddr, err := net.ResolveUDPAddr("udp", client.LocalAddr().String())
+	require.NoError(t, err)
+
+	// Send an oversized packet (>65535 bytes) which causes a transient EMSGSIZE write error
+	oversized := make([]byte, 70000)
+	err = ln.WriteMsg(oversized, clientAddr)
+	require.NoError(t, err) // WriteMsg enqueues to writeCh
+
+	// Give the write loop a moment to encounter the EMSGSIZE error and continue
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a normal valid packet
+	validMsg := []byte("survived-transient-error")
+	require.NoError(t, ln.WriteMsg(validMsg, clientAddr))
+
+	// The client should successfully receive the valid packet
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(2*time.Second)))
+	buf := make([]byte, 64)
+	n, err := client.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, string(validMsg), string(buf[:n]))
+}

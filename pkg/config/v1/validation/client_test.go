@@ -303,6 +303,7 @@ func TestValidateAllClientConfig(t *testing.T) {
 			Type:       "stcp",
 			ServerName: "s1",
 			BindPort:   9000,
+			SecretKey:  "123456",
 		},
 	}
 	stcpVisitor.Complete()

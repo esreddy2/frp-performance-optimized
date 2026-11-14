@@ -31,6 +31,7 @@ import (
 	"github.com/fatedier/frp/pkg/msg"
 	plugin "github.com/fatedier/frp/pkg/plugin/server"
 	"github.com/fatedier/frp/server/controller"
+	"github.com/fatedier/frp/server/ports"
 	"github.com/fatedier/frp/server/proxy"
 	"github.com/fatedier/frp/server/registry"
 )
@@ -755,4 +756,65 @@ func (m *countingServerMetrics) closedClients() int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.closeCount
+}
+
+func TestControlWaitForHandoffTimeout(t *testing.T) {
+	metrics := newCountingServerMetrics()
+	ctl, _ := newLifecycleTestControl(t, "run-handoff", "client", metrics)
+
+	// Set a barrier that never closes
+	neverClosedBarrier := make(chan struct{})
+	ctl.setHandoffBarrier(neverClosedBarrier)
+
+	// Temporarily reduce handoffBarrierTimeout for test
+	origTimeout := handoffBarrierTimeout
+	handoffBarrierTimeout = 50 * time.Millisecond
+	defer func() { handoffBarrierTimeout = origTimeout }()
+
+	done := make(chan struct{})
+	go func() {
+		ctl.WaitForHandoff()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success: WaitForHandoff unblocked after timeout
+	case <-time.After(time.Second):
+		t.Fatal("WaitForHandoff timed out waiting to unblock")
+	}
+}
+
+func TestControlRegisterProxyUserNamespaceEnforcement(t *testing.T) {
+	metrics := newCountingServerMetrics()
+	ctl, _ := newLifecycleTestControl(t, "run-user", "client", metrics)
+	ctl.sessionCtx.LoginMsg.User = "alice"
+	ctl.sessionCtx.RC.TCPPortManager = ports.NewManager("tcp", "127.0.0.1", nil)
+	defer ctl.sessionCtx.RC.TCPPortManager.Close()
+
+	// 1. Proxy name without user prefix fails
+	_, err := ctl.RegisterProxy(&msg.NewProxy{
+		ProxyName:  "my_tcp_proxy",
+		ProxyType:  "tcp",
+		RemotePort: 0,
+	}, plugin.UserInfo{User: "alice"}, "attempt-1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not belong to user [alice] namespace")
+
+	// 2. Proxy name belonging to another user fails
+	_, err = ctl.RegisterProxy(&msg.NewProxy{
+		ProxyName:  "bob.my_tcp_proxy",
+		ProxyType:  "tcp",
+		RemotePort: 0,
+	}, plugin.UserInfo{User: "alice"}, "attempt-2")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not belong to user [alice] namespace")
+
+	// 3. Proxy name with alice. prefix succeeds
+	_, err = ctl.RegisterProxy(&msg.NewProxy{
+		ProxyName:  "alice.my_tcp_proxy",
+		ProxyType:  "tcp",
+		RemotePort: 0,
+	}, plugin.UserInfo{User: "alice"}, "attempt-3")
+	require.NoError(t, err)
 }

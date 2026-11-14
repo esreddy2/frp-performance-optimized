@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -991,20 +992,6 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 
 		c = netpkg.NewContextConn(xlog.NewContext(ctx, xl), c)
 
-		if !internal {
-			log.Tracef("start check TLS connection...")
-			originConn := c
-			forceTLS := svr.cfg.Transport.TLS.Force
-			var isTLS, custom bool
-			c, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(c, svr.tlsConfig, forceTLS, connReadTimeout)
-			if err != nil {
-				log.Warnf("checkAndEnableTLSServerConnWithTimeout error: %v", err)
-				originConn.Close()
-				continue
-			}
-			log.Tracef("check TLS connection success, isTLS: %v custom: %v internal: %v", isTLS, custom, internal)
-		}
-
 		// Start a new goroutine to handle connection.
 		go func(ctx context.Context, frpConn net.Conn) {
 			defer func() {
@@ -1013,6 +1000,21 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 					frpConn.Close()
 				}
 			}()
+
+			if !internal {
+				log.Tracef("start check TLS connection...")
+				originConn := frpConn
+				forceTLS := svr.cfg.Transport.TLS.Force
+				var isTLS, custom bool
+				var err error
+				frpConn, isTLS, custom, err = netpkg.CheckAndEnableTLSServerConnWithTimeout(frpConn, svr.tlsConfig, forceTLS, connReadTimeout)
+				if err != nil {
+					log.Warnf("checkAndEnableTLSServerConnWithTimeout error: %v", err)
+					originConn.Close()
+					return
+				}
+				log.Tracef("check TLS connection success, isTLS: %v custom: %v internal: %v", isTLS, custom, internal)
+			}
 			if lo.FromPtr(svr.cfg.Transport.TCPMux) && !internal {
 				fmuxCfg := fmux.DefaultConfig()
 				fmuxCfg.KeepAliveInterval = time.Duration(svr.cfg.Transport.TCPMuxKeepaliveInterval) * time.Second
@@ -1206,10 +1208,32 @@ func (svr *Service) RegisterWorkConn(
 	return svr.ctlManager.RegisterWorkConn(ctl, proxy.NewWorkConn(workConn))
 }
 
+func normalizeWireProtocol(wireProtocol string) string {
+	if wireProtocol == wire.ProtocolV2 {
+		return wire.ProtocolV2
+	}
+	return wire.ProtocolV1
+}
+
+// RegisterVisitorConn handles incoming visitor connections for visitor-mediated proxies (STCP, SUDP).
+//
+// Architecture & Threat Model Note (CANON-099):
+// STCP and SUDP utilize a server-mediated, hop-by-hop relay architecture.
+// FRPS terminates visitor encryption (Hop 1) using SecretKey in VisitorManager.NewConn,
+// yielding cleartext application data in FRPS process memory during joinUserConnection.
+// Traffic is then re-encrypted (Hop 2) to the client using pxy.encryptionKey or transport TLS.
+// Users requiring zero-trust end-to-end encryption across untrusted relay hosts should encapsulate
+// application-layer TLS/SSH inside STCP or utilize direct P2P punching (XTCP).
+// For comprehensive threat model analysis, see doc/stcp_sudp_architecture.md.
+//
+// Wire Protocol & Tenant Isolation (CANON-100):
+// - Supports flexible wire protocol interoperability between visitor and control sessions.
+// - Rejects unauthenticated visitors that omit RunID when targeting namespaced user tenant proxies.
 func (svr *Service) RegisterVisitorConn(visitorConn net.Conn, newMsg *msg.NewVisitorConn, wireProtocol string) error {
+	normWire := normalizeWireProtocol(wireProtocol)
 	admit := func(visitorUser, visitorWireProtocol, visitorUDPPacketCodec string) error {
 		if visitorWireProtocol == "" {
-			visitorWireProtocol = wireProtocol
+			visitorWireProtocol = normWire
 		}
 		return svr.rc.VisitorManager.NewConn(newMsg.ProxyName, visitorConn, newMsg.Timestamp, newMsg.SignKey,
 			newMsg.UseEncryption, newMsg.UseCompression, visitorUser, visitorWireProtocol, visitorUDPPacketCodec)
@@ -1218,10 +1242,11 @@ func (svr *Service) RegisterVisitorConn(visitorConn net.Conn, newMsg *msg.NewVis
 	// If runID is required, it is not compatible with versions prior to v0.50.0.
 	if newMsg.RunID != "" {
 		admitted, err := svr.ctlManager.admitVisitorByRunID(newMsg.RunID, func(visitorUser, controlWireProtocol, controlUDPPacketCodec string) error {
-			if wireProtocol != controlWireProtocol {
+			normControlWire := normalizeWireProtocol(controlWireProtocol)
+			if normWire != normControlWire && controlUDPPacketCodec == wire.UDPPacketCodecBinary {
 				return fmt.Errorf("visitor connection wire protocol mismatch: got %s want %s", wireProtocol, controlWireProtocol)
 			}
-			return admit(visitorUser, controlWireProtocol, controlUDPPacketCodec)
+			return admit(visitorUser, normWire, controlUDPPacketCodec)
 		})
 		if err != nil {
 			return err
@@ -1231,5 +1256,12 @@ func (svr *Service) RegisterVisitorConn(visitorConn net.Conn, newMsg *msg.NewVis
 		}
 		return nil
 	}
-	return admit("", wireProtocol, "")
+
+	// Security (CANON-100): If RunID is omitted, verify that the target proxy does not belong to a namespaced user tenant.
+	// Tenant-isolated proxies (namespaced as "<user>.<name>") strictly require an authenticated RunID.
+	if strings.Contains(newMsg.ProxyName, ".") {
+		return fmt.Errorf("run id is required for namespaced tenant proxy [%s]", newMsg.ProxyName)
+	}
+
+	return admit("", normWire, "")
 }

@@ -30,11 +30,33 @@ func ValidateVisitorConfigurer(c v1.VisitorConfigurer) error {
 
 	switch v := c.(type) {
 	case *v1.STCPVisitorConfig:
+		if base.SecretKey == "" {
+			return errors.New("secretKey is required")
+		}
+		if err := validateVisitorBindPort(base); err != nil {
+			return err
+		}
 	case *v1.SUDPVisitorConfig:
+		if base.SecretKey == "" {
+			return errors.New("secretKey is required")
+		}
+		if err := validateVisitorBindPort(base); err != nil {
+			return err
+		}
 	case *v1.XTCPVisitorConfig:
 		return validateXTCPVisitorConfig(v)
 	default:
 		return errors.New("unknown visitor config type")
+	}
+	return nil
+}
+
+func validateVisitorBindPort(base *v1.VisitorBaseConfig) error {
+	if base.Plugin.Type != "" && base.BindPort == -1 {
+		return nil
+	}
+	if base.BindPort <= 0 || base.BindPort > 65535 {
+		return errors.New("bind port must be between 1 and 65535")
 	}
 	return nil
 }

@@ -579,6 +579,7 @@ func TestServiceConfigManagerCRUDAndFileOps(t *testing.T) {
 			Name:       "missing",
 			Type:       "stcp",
 			ServerName: "srv1",
+			SecretKey:  "sec",
 			BindPort:   9002,
 		},
 	}

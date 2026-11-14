@@ -67,6 +67,7 @@ func TestFlagsRegistrationAndCustomFlags(t *testing.T) {
 		"--allow_ports=4000-4005",
 	}))
 	require.Equal(7100, srvCfg.BindPort)
+	require.Empty(srvCfg.WebServer.Password)
 	require.NotNil(srvCfg.WebServer.TLS)
 	require.Equal("/tmp/cert.pem", srvCfg.WebServer.TLS.CertFile)
 	require.Equal("/tmp/key.pem", srvCfg.WebServer.TLS.KeyFile)

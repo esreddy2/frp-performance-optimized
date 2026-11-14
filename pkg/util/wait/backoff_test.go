@@ -159,3 +159,27 @@ func TestBackoffUntilUntilAndJitter(t *testing.T) {
 	}
 	require.GreaterOrEqual(count.Load(), int32(3))
 }
+
+type zeroBackoffManager struct{}
+
+func (z *zeroBackoffManager) Backoff(_ time.Duration, _ bool) time.Duration {
+	return 0
+}
+
+func TestBackoffUntilZeroOrNegativeDurationNoPanic(t *testing.T) {
+	require := require.New(t)
+
+	stopCh := make(chan struct{})
+	var calls atomic.Int32
+
+	require.NotPanics(func() {
+		BackoffUntil(func() (bool, error) {
+			if calls.Add(1) >= 2 {
+				close(stopCh)
+				return true, nil
+			}
+			return false, nil
+		}, &zeroBackoffManager{}, true, stopCh)
+	})
+	require.GreaterOrEqual(calls.Load(), int32(2))
+}

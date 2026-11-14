@@ -142,12 +142,10 @@ func NewServerTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
 
 // NewClientTLSConfig builds a client TLS config using only caPath as a trust
 // anchor. When caPath is empty, server certificate verification is disabled
-// (InsecureSkipVerify = true) for backward compatibility with ephemeral
-// self-signed server certificates (such as XTCP tunnels and default frps).
-// Prefer NewClientTLSConfigWithSystemCA with useSystemCa=true or a non-empty
-// caPath whenever authenticating a server with a known CA.
+// NewClientTLSConfig builds a client TLS config. When no custom CA is provided (caPath == ""),
+// it defaults to validating against system CAs (useSystemCa = true), avoiding InsecureSkipVerify by default.
 func NewClientTLSConfig(certPath, keyPath, caPath, serverName string) (*tls.Config, error) {
-	return NewClientTLSConfigWithSystemCA(certPath, keyPath, caPath, serverName, false)
+	return NewClientTLSConfigWithSystemCA(certPath, keyPath, caPath, serverName, caPath == "")
 }
 
 // NewClientTLSConfigWithSystemCA enables verification against system CAs when

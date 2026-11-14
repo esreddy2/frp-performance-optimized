@@ -15,6 +15,7 @@ type TunnelClient struct {
 
 	sshConn *ssh.Client
 	ln      net.Listener
+	ch      ssh.Channel
 }
 
 func NewTunnelClient(localAddr string, sshServer string, commands string) *TunnelClient {
@@ -51,7 +52,7 @@ func (c *TunnelClient) Start() error {
 	if err != nil {
 		return err
 	}
-	defer ch.Close()
+	c.ch = ch
 	go ssh.DiscardRequests(req)
 
 	type command struct {
@@ -59,6 +60,7 @@ func (c *TunnelClient) Start() error {
 	}
 	_, err = ch.SendRequest("exec", false, ssh.Marshal(command{Cmd: c.commands}))
 	if err != nil {
+		_ = ch.Close()
 		return err
 	}
 
@@ -79,11 +81,14 @@ func loadServerHostKey() (ssh.PublicKey, error) {
 }
 
 func (c *TunnelClient) Close() {
-	if c.sshConn != nil {
-		_ = c.sshConn.Close()
+	if c.ch != nil {
+		_ = c.ch.Close()
 	}
 	if c.ln != nil {
 		_ = c.ln.Close()
+	}
+	if c.sshConn != nil {
+		_ = c.sshConn.Close()
 	}
 }
 

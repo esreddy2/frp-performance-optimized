@@ -609,3 +609,107 @@ func TestUserInfoCloneIsIndependent(t *testing.T) {
 		t.Fatalf("unexpected cloned identity: %#v", clone)
 	}
 }
+
+func TestManagerMutableContentNilPointerCheck(t *testing.T) {
+	m := NewManager()
+	defer m.Close()
+
+	// Register a plugin that returns Unchange: false but returns nil content
+	m.Register(testPlugin{
+		name: "nil-content-plugin",
+		ops:  map[string]bool{OpNewProxy: true},
+		handler: func(_ context.Context, _ string, _ any) (*Response, any, error) {
+			return &Response{Unchange: false}, nil, nil
+		},
+	})
+
+	content := &NewProxyContent{
+		AttemptID: "attempt-nil",
+		User:      UserInfo{User: "alice"},
+	}
+
+	// This should return an error and NOT panic
+	_, err := m.NewProxy(content)
+	if err == nil {
+		t.Fatal("expected error when plugin returns unchange: false with nil content, got nil")
+	}
+
+	// Also test typed nil pointer
+	m2 := NewManager()
+	defer m2.Close()
+	m2.Register(testPlugin{
+		name: "typed-nil-plugin",
+		ops:  map[string]bool{OpNewProxy: true},
+		handler: func(_ context.Context, _ string, _ any) (*Response, any, error) {
+			var typedNil *NewProxyContent
+			return &Response{Unchange: false}, typedNil, nil
+		},
+	})
+	_, err = m2.NewProxy(content)
+	if err == nil {
+		t.Fatal("expected error when plugin returns unchange: false with typed nil content, got nil")
+	}
+}
+
+func TestManagerCloseProxyWorkerPoolConcurrency(t *testing.T) {
+	m := newManagerWithCloseProxyDelivery(
+		8,
+		func(int) time.Duration { return time.Millisecond },
+		2*time.Second,
+		2*time.Second,
+	)
+	defer m.Close()
+
+	firstStarted := make(chan struct{})
+	blockFirst := make(chan struct{})
+	secondDelivered := make(chan struct{})
+
+	var firstCalls atomic.Int32
+	m.Register(testPlugin{
+		name: "slow-or-fast",
+		ops:  map[string]bool{OpCloseProxy: true},
+		handler: func(_ context.Context, _ string, content any) (*Response, any, error) {
+			cp := content.(CloseProxyContent)
+			if cp.AttemptID == "slow" {
+				firstCalls.Add(1)
+				close(firstStarted)
+				<-blockFirst
+				return &Response{Unchange: true}, nil, nil
+			}
+			if cp.AttemptID == "fast" {
+				close(secondDelivered)
+				return &Response{Unchange: true}, nil, nil
+			}
+			return &Response{Unchange: true}, nil, nil
+		},
+	})
+
+	// Enqueue slow task
+	if err := m.CloseProxy(&CloseProxyContent{AttemptID: "slow"}); err != nil {
+		t.Fatalf("failed to enqueue slow task: %v", err)
+	}
+
+	// Wait until slow task starts running on worker 1
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow task did not start in time")
+	}
+
+	// Enqueue fast task while slow task is still blocked
+	if err := m.CloseProxy(&CloseProxyContent{AttemptID: "fast"}); err != nil {
+		t.Fatalf("failed to enqueue fast task: %v", err)
+	}
+
+	// Fast task should be picked up by another worker in the pool and complete
+	// WITHOUT waiting for blockFirst to be unblocked!
+	select {
+	case <-secondDelivered:
+		// Succeeded: second task was processed concurrently!
+	case <-time.After(2 * time.Second):
+		t.Fatal("head-of-line blocking occurred: fast task was not delivered while first task was blocked")
+	}
+
+	// Unblock first task so cleanup succeeds
+	close(blockFirst)
+}

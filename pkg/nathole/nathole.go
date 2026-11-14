@@ -132,11 +132,11 @@ func Prepare(stunServers []string, opts PrepareOptions) (*PrepareResult, error) 
 		return nil, fmt.Errorf("classify nat feature error: %v", err)
 	}
 
-	laddr, err := net.ResolveUDPAddr("udp4", localAddr.String())
+	laddr, err := net.ResolveUDPAddr("udp", localAddr.String())
 	if err != nil {
 		return nil, fmt.Errorf("resolve local udp addr error: %v", err)
 	}
-	listenConn, err := net.ListenUDP("udp4", laddr)
+	listenConn, err := net.ListenUDP("udp", laddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen local udp addr error: %v", err)
 	}
@@ -213,8 +213,12 @@ func MakeHole(ctx context.Context, listenConn *net.UDPConn, m *msg.NatHoleResp, 
 		}
 
 		if m.DetectBehavior.ListenRandomPorts > 0 {
+			network := "udp"
+			if listenConn != nil && listenConn.LocalAddr() != nil && listenConn.LocalAddr().Network() != "" {
+				network = listenConn.LocalAddr().Network()
+			}
 			for i := 0; i < m.DetectBehavior.ListenRandomPorts; i++ {
-				tmpConn, err := net.ListenUDP("udp4", nil)
+				tmpConn, err := net.ListenUDP(network, nil)
 				if err != nil {
 					xl.Warnf("listen random udp addr error: %v", err)
 					continue
@@ -344,7 +348,7 @@ func sendSidMessage(
 		ttlStr = fmt.Sprintf(" with ttl %d", ttl)
 	}
 	xl.Tracef("send sid message from %s to %s%s", conn.LocalAddr(), addr, ttlStr)
-	raddr, err := net.ResolveUDPAddr("udp4", addr)
+	raddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return err
 	}

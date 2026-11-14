@@ -19,28 +19,32 @@ var _ = ginkgo.Describe("[Feature: XTCP]", func() {
 		serverConf := consts.DefaultServerConfig
 		clientConf := consts.DefaultClientConfig
 
+		fallbackPortName := port.GenName("FALLBACK")
 		bindPortName := port.GenName("XTCP")
 		clientConf += fmt.Sprintf(`
 			[[proxies]]
 			name = "foo"
 			type = "stcp"
+			secretKey = "abcdefg"
 			localPort = {{ .%s }}
 
 			[[visitors]]
 			name = "foo-visitor"
 			type = "stcp"
 			serverName = "foo"
-			bindPort = -1
+			secretKey = "abcdefg"
+			bindPort = {{ .%s }}
 
 			[[visitors]]
 			name = "bar-visitor"
 			type = "xtcp"
 			serverName = "bar"
+			secretKey = "abcdefg"
 			bindPort = {{ .%s }}
 			keepTunnelOpen = true
 			fallbackTo = "foo-visitor"
 			fallbackTimeoutMs = 200
-			`, framework.TCPEchoServerPort, bindPortName)
+			`, framework.TCPEchoServerPort, fallbackPortName, bindPortName)
 
 		f.RunProcesses(serverConf, []string{clientConf})
 		framework.NewRequestExpect(f).

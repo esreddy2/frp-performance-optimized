@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"net/http/pprof"
 
+	"github.com/gorilla/mux"
+
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 )
 
@@ -42,12 +44,26 @@ func NewMetricsServer(cfg v1.MetricsServerConfig, metricsHandler http.Handler) (
 	if cfg.PprofEnable {
 		// Use exact routes rather than a prefix so cmdline and unknown endpoints
 		// cannot reach pprof.Index's fallback dispatch.
-		authed.HandleFunc("/debug/pprof/", pprof.Index)
-		authed.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		authed.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		authed.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		// Disallow anonymous pprof (CANON-023): when credentials are blank,
+		// requests to /debug/pprof/* are disallowed and rejected with 401.
+		var pprofRouter *mux.Router
+		if cfg.User == "" && cfg.Password == "" {
+			pprofRouter = s.router.NewRoute().Subrouter()
+			pprofRouter.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+					http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+				})
+			})
+		} else {
+			pprofRouter = authed
+		}
+		pprofRouter.HandleFunc("/debug/pprof/", pprof.Index)
+		pprofRouter.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pprofRouter.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pprofRouter.HandleFunc("/debug/pprof/trace", pprof.Trace)
 		for _, name := range []string{"allocs", "block", "goroutine", "heap", "mutex", "threadcreate"} {
-			authed.Handle("/debug/pprof/"+name, pprof.Handler(name))
+			pprofRouter.Handle("/debug/pprof/"+name, pprof.Handler(name))
 		}
 	}
 	return s, nil

@@ -33,6 +33,7 @@ const (
 	closeProxyGraceTimeout          = 5 * time.Second
 	closeProxyRetryInitialDelay     = 100 * time.Millisecond
 	closeProxyRetryMaxDelay         = 5 * time.Second
+	closeProxyWorkers               = 8
 )
 
 var (
@@ -184,9 +185,14 @@ func handleMutableContent[T any](
 			return nil, fmt.Errorf("%s", res.RejectReason)
 		}
 		if !res.Unchange {
-			// Preserve the existing Plugin contract: changed content must be *T.
-			// Buggy Plugin implementations still panic here, by design.
-			content = retContent.(*T)
+			if retContent == nil {
+				return nil, errors.New("plugin returned nil content for changed operation")
+			}
+			typed, ok := retContent.(*T)
+			if !ok || typed == nil {
+				return nil, errors.New("plugin returned invalid or nil content for changed operation")
+			}
+			content = typed
 			for _, fix := range afterMutate {
 				fix(content)
 			}
@@ -310,8 +316,10 @@ func (m *Manager) enqueueCloseProxy(task closeProxyNotification) error {
 	}
 	if !m.closeProxyWorkerOn {
 		m.closeProxyWorkerOn = true
-		m.notificationWG.Add(1)
-		go m.runCloseProxyWorker()
+		for range closeProxyWorkers {
+			m.notificationWG.Add(1)
+			go m.runCloseProxyWorker()
+		}
 	}
 	m.pendingNotifications.Add(1)
 	select {

@@ -1,6 +1,7 @@
 package aggregate
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -66,4 +67,43 @@ func TestAggregateServerMetricsFanOut(t *testing.T) {
 		require.Equal(0, r.proxies)
 		require.Equal(0, r.connections)
 	}
+}
+
+type threadSafeMockMetrics struct{}
+
+func (m *threadSafeMockMetrics) NewClient()                         {}
+func (m *threadSafeMockMetrics) CloseClient()                       {}
+func (m *threadSafeMockMetrics) NewProxy(_, _, _, _ string)         {}
+func (m *threadSafeMockMetrics) CloseProxy(_, _ string)             {}
+func (m *threadSafeMockMetrics) OpenConnection(_, _ string)         {}
+func (m *threadSafeMockMetrics) CloseConnection(_, _ string)        {}
+func (m *threadSafeMockMetrics) AddTrafficIn(_, _ string, _ int64)  {}
+func (m *threadSafeMockMetrics) AddTrafficOut(_, _ string, _ int64) {}
+
+func TestAggregateServerMetricsConcurrentAccess(t *testing.T) {
+	orig := sm.ms
+	t.Cleanup(func() {
+		sm.ms = orig
+	})
+	sm.ms = nil
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				sm.Add(&threadSafeMockMetrics{})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				sm.NewClient()
+				sm.AddTrafficIn("test", "tcp", 10)
+				sm.CloseClient()
+			}
+		}()
+	}
+	wg.Wait()
 }

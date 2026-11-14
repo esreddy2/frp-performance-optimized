@@ -3,6 +3,7 @@ package framework
 import (
 	"bytes"
 	"net/http"
+	"time"
 
 	flog "github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/test/e2e/framework/consts"
@@ -123,4 +124,36 @@ func (e *RequestExpect) Ensure(fns ...EnsureFunc) {
 			ExpectTrueWithOffset(1, ok, e.explain...)
 		}
 	}
+}
+
+// EnsureEventually repeatedly evaluates e.req.Do() until the expectation is met or timeout expires.
+func (e *RequestExpect) EnsureEventually(timeout, interval time.Duration, fns ...EnsureFunc) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ret, err := e.req.Do()
+		if e.expectError {
+			if err != nil {
+				return
+			}
+		} else if err == nil {
+			if len(fns) == 0 {
+				if bytes.Equal(e.expectResp, ret.Content) {
+					return
+				}
+			} else {
+				allOk := true
+				for _, fn := range fns {
+					if !fn(ret) {
+						allOk = false
+						break
+					}
+				}
+				if allOk {
+					return
+				}
+			}
+		}
+		time.Sleep(interval)
+	}
+	e.Ensure(fns...)
 }

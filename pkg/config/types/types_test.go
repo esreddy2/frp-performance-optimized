@@ -107,6 +107,13 @@ func TestNewPortsRangeSliceFromString(t *testing.T) {
 		"2000-1000",
 		"1000-2000-3000",
 		"1000,",
+		"0",
+		"-1",
+		"65536",
+		"70000",
+		"0-100",
+		"100-70000",
+		"-100-200",
 	} {
 		_, err := NewPortsRangeSliceFromString(invalid)
 		require.Error(err, "expected error for input %q", invalid)

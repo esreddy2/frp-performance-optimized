@@ -84,6 +84,10 @@ func ParseRangeNumbers(rangeStr string) (numbers []int64, err error) {
 				err = fmt.Errorf("range number is invalid, %v", errRet)
 				return
 			}
+			if singleNum < 0 {
+				err = fmt.Errorf("range number is invalid")
+				return
+			}
 			numbers = append(numbers, singleNum)
 		case 2:
 			// range numbers
@@ -97,7 +101,7 @@ func ParseRangeNumbers(rangeStr string) (numbers []int64, err error) {
 				err = fmt.Errorf("range number is invalid, %v", errRet)
 				return
 			}
-			if maxValue < minValue {
+			if minValue < 0 || maxValue < minValue || maxValue-minValue < 0 || maxValue-minValue >= 65535 {
 				err = fmt.Errorf("range number is invalid")
 				return
 			}

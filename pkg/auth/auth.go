@@ -16,11 +16,23 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
 )
+
+func deriveEncryptionKey(token string, method v1.AuthMethod) []byte {
+	if token != "" {
+		return []byte(token)
+	}
+	if method == v1.AuthMethodOIDC {
+		h := sha256.Sum256([]byte("frp-oidc-fallback-key"))
+		return h[:]
+	}
+	return []byte("")
+}
 
 type Setter interface {
 	SetLogin(*msg.Login) error
@@ -57,7 +69,7 @@ func BuildClientAuth(cfg *v1.AuthClientConfig) (*ClientAuth, error) {
 	}
 	return &ClientAuth{
 		Setter: setter,
-		key:    []byte(resolved.Token),
+		key:    deriveEncryptionKey(resolved.Token, resolved.Method),
 	}, nil
 }
 
@@ -115,7 +127,7 @@ func BuildServerAuth(cfg *v1.AuthServerConfig) (*ServerAuth, error) {
 	}
 	return &ServerAuth{
 		Verifier: verifier,
-		key:      []byte(resolved.Token),
+		key:      deriveEncryptionKey(resolved.Token, resolved.Method),
 	}, nil
 }
 

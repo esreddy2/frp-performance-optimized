@@ -74,11 +74,15 @@ func InitLogger(logPath string, levelStr string, maxDays int, disableLogColor bo
 	loggerMu.Unlock()
 }
 
-func currentLogger() *log.Logger {
+func CurrentLogger() *log.Logger {
 	loggerMu.RLock()
 	l := Logger
 	loggerMu.RUnlock()
 	return l
+}
+
+func currentLogger() *log.Logger {
+	return CurrentLogger()
 }
 
 func Errorf(format string, v ...any) {

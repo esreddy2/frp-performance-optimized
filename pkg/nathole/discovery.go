@@ -34,13 +34,18 @@ func Discover(stunServers []string, localAddr string) ([]string, net.Addr, error
 	defer discoverConn.Close()
 
 	addresses := make([]string, 0, len(stunServers))
+	var lastErr error
 	for _, addr := range stunServers {
 		// get external address from stun server
 		externalAddrs, err := discoverConn.discoverFromStunServer(addr)
 		if err != nil {
-			return nil, nil, err
+			lastErr = err
+			continue
 		}
 		addresses = append(addresses, externalAddrs...)
+	}
+	if len(addresses) == 0 && lastErr != nil {
+		return nil, nil, lastErr
 	}
 	return addresses, discoverConn.localAddr, nil
 }
@@ -59,13 +64,13 @@ type discoverConn struct {
 func listen(localAddr string) (*discoverConn, error) {
 	var local *net.UDPAddr
 	if localAddr != "" {
-		addr, err := net.ResolveUDPAddr("udp4", localAddr)
+		addr, err := net.ResolveUDPAddr("udp", localAddr)
 		if err != nil {
 			return nil, err
 		}
 		local = addr
 	}
-	conn, err := net.ListenUDP("udp4", local)
+	conn, err := net.ListenUDP("udp", local)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +92,7 @@ func (c *discoverConn) Close() error {
 }
 
 func (c *discoverConn) doSTUNRequest(addr string) (*stunResponse, error) {
-	serverAddr, err := net.ResolveUDPAddr("udp4", addr)
+	serverAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
 	}

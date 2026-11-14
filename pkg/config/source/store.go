@@ -292,7 +292,7 @@ func (s *StoreSource) GetProxy(name string) v1.ProxyConfigurer {
 	if !exists {
 		return nil
 	}
-	return p
+	return p.Clone()
 }
 
 func (s *StoreSource) AddVisitor(visitor v1.VisitorConfigurer) error {
@@ -323,7 +323,7 @@ func (s *StoreSource) GetVisitor(name string) v1.VisitorConfigurer {
 	if !exists {
 		return nil
 	}
-	return v
+	return v.Clone()
 }
 
 func (s *StoreSource) GetAllProxies() ([]v1.ProxyConfigurer, error) {
@@ -332,7 +332,7 @@ func (s *StoreSource) GetAllProxies() ([]v1.ProxyConfigurer, error) {
 
 	result := make([]v1.ProxyConfigurer, 0, len(s.proxies))
 	for _, p := range s.proxies {
-		result = append(result, p)
+		result = append(result, p.Clone())
 	}
 	return result, nil
 }
@@ -343,7 +343,7 @@ func (s *StoreSource) GetAllVisitors() ([]v1.VisitorConfigurer, error) {
 
 	result := make([]v1.VisitorConfigurer, 0, len(s.visitors))
 	for _, v := range s.visitors {
-		result = append(result, v)
+		result = append(result, v.Clone())
 	}
 	return result, nil
 }

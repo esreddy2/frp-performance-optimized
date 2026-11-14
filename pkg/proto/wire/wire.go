@@ -21,6 +21,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"sync"
 
 	libnet "github.com/fatedier/golib/net"
 )
@@ -87,6 +88,13 @@ func (c *Conn) ReadFrame() (*Frame, error) {
 	}, nil
 }
 
+var frameBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
+
 func (c *Conn) WriteFrame(f *Frame) error {
 	if f.Flags != 0 {
 		return fmt.Errorf("unsupported frame flags: %d", f.Flags)
@@ -95,7 +103,25 @@ func (c *Conn) WriteFrame(f *Frame) error {
 		return fmt.Errorf("frame payload length %d exceeds limit %d", len(f.Payload), c.maxFramePayloadSize)
 	}
 
-	buf := make([]byte, 8+len(f.Payload))
+	frameLen := 8 + len(f.Payload)
+	var buf []byte
+	if frameLen <= 65536 {
+		bufPtr := frameBufPool.Get().(*[]byte)
+		if cap(*bufPtr) < frameLen {
+			*bufPtr = make([]byte, frameLen)
+		} else {
+			*bufPtr = (*bufPtr)[:frameLen]
+		}
+		buf = *bufPtr
+		defer func() {
+			if cap(buf) <= 65536 {
+				frameBufPool.Put(&buf)
+			}
+		}()
+	} else {
+		buf = make([]byte, frameLen)
+	}
+
 	binary.BigEndian.PutUint16(buf[0:2], f.Type)
 	binary.BigEndian.PutUint16(buf[2:4], f.Flags)
 	binary.BigEndian.PutUint32(buf[4:8], uint32(len(f.Payload)))

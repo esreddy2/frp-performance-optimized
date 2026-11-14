@@ -16,6 +16,7 @@ package tcpmux
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/subtle"
 	"fmt"
 	"io"
@@ -28,6 +29,15 @@ import (
 	httppkg "github.com/fatedier/frp/pkg/util/http"
 	"github.com/fatedier/frp/pkg/util/vhost"
 )
+
+type bufferedConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) {
+	return b.r.Read(p)
+}
 
 type HTTPConnectTCPMuxer struct {
 	*vhost.Muxer
@@ -50,17 +60,17 @@ func NewHTTPConnectTCPMuxer(listener net.Listener, passthrough bool, timeout tim
 	return ret, nil
 }
 
-func (muxer *HTTPConnectTCPMuxer) readHTTPConnectRequest(rd io.Reader) (host, httpUser, httpPwd string, err error) {
+func (muxer *HTTPConnectTCPMuxer) readHTTPConnectRequest(rd io.Reader) (host, httpUser, httpPwd string, br *bufio.Reader, err error) {
 	bufioReader := bufio.NewReader(rd)
 
 	req, err := http.ReadRequest(bufioReader)
 	if err != nil {
-		return
+		return "", "", "", nil, err
 	}
 
 	if req.Method != "CONNECT" {
 		err = fmt.Errorf("connections to tcp vhost must be of method CONNECT")
-		return
+		return "", "", "", nil, err
 	}
 
 	host, _ = httppkg.CanonicalHost(req.Host)
@@ -68,7 +78,7 @@ func (muxer *HTTPConnectTCPMuxer) readHTTPConnectRequest(rd io.Reader) (host, ht
 	if proxyAuth != "" {
 		httpUser, httpPwd, _ = httppkg.ParseBasicAuth(proxyAuth)
 	}
-	return
+	return host, httpUser, httpPwd, bufioReader, nil
 }
 
 func (muxer *HTTPConnectTCPMuxer) sendConnectResponse(c net.Conn, _ map[string]string) error {
@@ -112,7 +122,7 @@ func (muxer *HTTPConnectTCPMuxer) getHostFromHTTPConnect(c net.Conn) (net.Conn, 
 	reqInfoMap := make(map[string]string, 0)
 	sc, rd := libnet.NewSharedConn(c)
 
-	host, httpUser, httpPwd, err := muxer.readHTTPConnectRequest(rd)
+	host, httpUser, httpPwd, bufioReader, err := muxer.readHTTPConnectRequest(rd)
 	if err != nil {
 		return nil, reqInfoMap, err
 	}
@@ -125,6 +135,13 @@ func (muxer *HTTPConnectTCPMuxer) getHostFromHTTPConnect(c net.Conn) (net.Conn, 
 	outConn := c
 	if muxer.passthrough {
 		outConn = sc
+	} else if bufioReader != nil && bufioReader.Buffered() > 0 {
+		residual := make([]byte, bufioReader.Buffered())
+		_, _ = io.ReadFull(bufioReader, residual)
+		outConn = &bufferedConn{
+			Conn: c,
+			r:    io.MultiReader(bytes.NewReader(residual), c),
+		}
 	}
 	return outConn, reqInfoMap, nil
 }

@@ -67,3 +67,18 @@ func TestMessageTransporterDispatchNonBlockingAndCancelRace(t *testing.T) {
 	_ = tr.Dispatch(&msg.Pong{}, "dup-lane")
 	<-done
 }
+
+func TestMessageTransporterDispatchNilAndNonPointer(t *testing.T) {
+	tr := NewMessageTransporter(noopSender{})
+
+	require.NotPanics(t, func() {
+		ok := tr.Dispatch(nil, "lane")
+		require.False(t, ok)
+	})
+
+	require.NotPanics(t, func() {
+		// Non-pointer message (value struct)
+		ok := tr.Dispatch(msg.Ping{}, "lane")
+		require.False(t, ok)
+	})
+}

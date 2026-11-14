@@ -40,6 +40,28 @@ func TestParseRangeNumbers(t *testing.T) {
 
 	_, err = ParseRangeNumbers("3-a")
 	require.Error(err)
+
+	// Inverted range
+	_, err = ParseRangeNumbers("5-2")
+	require.Error(err)
+
+	// Negative numbers
+	_, err = ParseRangeNumbers("-1")
+	require.Error(err)
+
+	// Range span exceeding maximum 65535
+	_, err = ParseRangeNumbers("1-1000000000")
+	require.Error(err)
+
+	_, err = ParseRangeNumbers("0-65535")
+	require.Error(err)
+
+	// Valid span (< 65535)
+	numbers, err = ParseRangeNumbers("1-65535")
+	require.NoError(err)
+	require.Equal(65535, len(numbers))
+	require.Equal(int64(1), numbers[0])
+	require.Equal(int64(65535), numbers[65534])
 }
 
 func TestClonePtr(t *testing.T) {

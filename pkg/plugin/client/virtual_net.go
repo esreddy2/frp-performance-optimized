@@ -33,6 +33,7 @@ type VirtualNetPlugin struct {
 	opts      *v1.VirtualNetPluginOptions
 	mu        sync.Mutex
 	conns     map[io.ReadWriteCloser]struct{}
+	closed    bool
 }
 
 func NewVirtualNetPlugin(pluginCtx PluginContext, options v1.ClientPluginOptions) (Plugin, error) {
@@ -54,9 +55,14 @@ func (p *VirtualNetPlugin) Handle(ctx context.Context, connInfo *ConnectionInfo)
 		return
 	}
 
-	// Add the connection before starting the read loop to avoid race condition
-	// where RemoveConn might be called before the connection is added.
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		if connInfo != nil && connInfo.Conn != nil {
+			_ = connInfo.Conn.Close()
+		}
+		return
+	}
 	if p.conns == nil {
 		p.conns = make(map[io.ReadWriteCloser]struct{})
 	}
@@ -86,6 +92,7 @@ func (p *VirtualNetPlugin) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.closed = true
 	// Close any remaining connections
 	for conn := range p.conns {
 		_ = conn.Close()

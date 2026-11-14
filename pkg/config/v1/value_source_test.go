@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/fatedier/frp/pkg/policy/security"
 )
 
 func TestValueSource_Validate(t *testing.T) {
@@ -273,12 +275,25 @@ func TestExecSource_Validate(t *testing.T) {
 }
 
 func TestExecSource_Resolve(t *testing.T) {
+	allowCtx := security.WithUnsafeFeatures(context.Background(), security.NewUnsafeFeatures([]string{security.TokenSourceExec}))
+
+	t.Run("rejects execution when policy disables TokenSourceExec", func(t *testing.T) {
+		es := &ExecSource{
+			Command: "sh",
+			Args:    []string{"-c", "printf 'secret-token'"},
+		}
+		_, err := es.Resolve(context.Background())
+		if err == nil {
+			t.Fatal("expected error due to security policy, got nil")
+		}
+	})
+
 	t.Run("valid command trims whitespace", func(t *testing.T) {
 		es := &ExecSource{
 			Command: "sh",
 			Args:    []string{"-c", "printf '  secret-token\\n'"},
 		}
-		got, err := es.Resolve(context.Background())
+		got, err := es.Resolve(allowCtx)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -292,7 +307,7 @@ func TestExecSource_Resolve(t *testing.T) {
 			Command: "sh",
 			Args:    []string{"-c", "sleep 5"},
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 50*1e6) // 50ms
+		ctx, cancel := context.WithTimeout(allowCtx, 50*1e6) // 50ms
 		defer cancel()
 		_, err := es.Resolve(ctx)
 		if err == nil {
@@ -305,7 +320,7 @@ func TestExecSource_Resolve(t *testing.T) {
 			Command: "sh",
 			Args:    []string{"-c", "head -c 2000000 /dev/zero | tr '\\0' 'a'"},
 		}
-		_, err := es.Resolve(context.Background())
+		_, err := es.Resolve(allowCtx)
 		if err == nil {
 			t.Fatal("expected output size limit error, got nil")
 		}

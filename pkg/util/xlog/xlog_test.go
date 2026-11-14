@@ -68,9 +68,9 @@ func TestLoggerPrefixesSpawnAndReset(t *testing.T) {
 	require.Contains(t, output.String(), "no-prefix")
 
 	// Add prefixes with different priorities and update existing by Name
-	xl.AddPrefix(LogPrefix{Name: "low", Value: "low-val", Priority: 100})
+	xl.AddPrefix(LogPrefix{Name: "high", Value: "high-val", Priority: 100})
 	xl.AddPrefix(LogPrefix{Name: "default", Value: "def-v1", Priority: 0})
-	xl.AddPrefix(LogPrefix{Name: "high", Value: "high-val", Priority: 1})
+	xl.AddPrefix(LogPrefix{Name: "low", Value: "low-val", Priority: 1})
 	xl.AddPrefix(LogPrefix{Name: "default", Value: "def-v2", Priority: 10})
 
 	output.Reset()

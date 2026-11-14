@@ -16,6 +16,7 @@ package source
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -235,4 +236,27 @@ func TestAggregator_Load_ReturnsDefensiveCopies(t *testing.T) {
 	require.NoError(err)
 	require.Len(proxies2, 1)
 	require.Equal("ssh", proxies2[0].GetBaseConfig().Name)
+}
+
+func TestAggregator_ConcurrentStoreSourceAccess(t *testing.T) {
+	agg := newTestAggregator(t, nil)
+	store := newTestStoreSource(t)
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				agg.SetStoreSource(store)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				_ = agg.StoreSource()
+			}
+		}()
+	}
+	wg.Wait()
 }

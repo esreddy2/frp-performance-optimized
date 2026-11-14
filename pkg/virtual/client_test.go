@@ -15,7 +15,10 @@
 package virtual
 
 import (
+	"io"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -62,4 +65,61 @@ func TestVirtualClientAndPipeConnector(t *testing.T) {
 	require.NoError(t, pc.Close())
 	_, err = pc.Connect()
 	require.Error(t, err)
+}
+
+func TestBufferedPipe(t *testing.T) {
+	require := require.New(t)
+
+	c1, c2 := NewBufferedPipe(16)
+	defer c1.Close()
+	defer c2.Close()
+
+	// 1. Buffered non-blocking writes: can write multiple chunks without blocking
+	msg1 := []byte("hello from 1")
+	msg2 := []byte("world from 1")
+	n, err := c1.Write(msg1)
+	require.NoError(err)
+	require.Equal(len(msg1), n)
+
+	n, err = c1.Write(msg2)
+	require.NoError(err)
+	require.Equal(len(msg2), n)
+
+	// Read from c2
+	buf := make([]byte, len(msg1)+len(msg2))
+	n, err = c2.Read(buf[:len(msg1)])
+	require.NoError(err)
+	require.Equal(msg1, buf[:n])
+
+	n, err = c2.Read(buf[len(msg1):])
+	require.NoError(err)
+	require.Equal(msg2, buf[len(msg1):len(msg1)+n])
+
+	// 2. Reverse direction: c2 -> c1
+	msg3 := []byte("response from 2")
+	n, err = c2.Write(msg3)
+	require.NoError(err)
+	require.Equal(len(msg3), n)
+
+	buf3 := make([]byte, len(msg3))
+	n, err = c1.Read(buf3)
+	require.NoError(err)
+	require.Equal(msg3, buf3[:n])
+
+	// 3. Addresses and deadlines
+	require.Equal("pipe", c1.LocalAddr().Network())
+	require.Equal("pipe", c1.RemoteAddr().Network())
+
+	// Read deadline in the past should immediately error
+	require.NoError(c2.SetReadDeadline(time.Now().Add(-time.Second)))
+	_, err = c2.Read(buf)
+	require.ErrorIs(err, os.ErrDeadlineExceeded)
+
+	// Reset read deadline
+	require.NoError(c2.SetReadDeadline(time.Time{}))
+
+	// 4. Closing c1 causes EOF on c2 read
+	require.NoError(c1.Close())
+	_, err = c2.Read(buf)
+	require.ErrorIs(err, io.EOF)
 }

@@ -1,6 +1,8 @@
 package framework
 
 import (
+	"time"
+
 	"github.com/onsi/gomega"
 )
 
@@ -56,4 +58,16 @@ func ExpectTrue(actual any, explain ...any) {
 
 func ExpectTrueWithOffset(offset int, actual any, explain ...any) {
 	gomega.ExpectWithOffset(1+offset, actual).Should(gomega.BeTrue(), explain...)
+}
+
+// Eventually polls condition fn until it returns true or timeout expires.
+func Eventually(fn func() bool, timeout, interval time.Duration, explain ...any) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(interval)
+	}
+	gomega.ExpectWithOffset(1, fn()).Should(gomega.BeTrue(), explain...)
 }

@@ -6,6 +6,8 @@ import (
 	"html"
 	"net"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	pp "github.com/pires/go-proxyproto"
@@ -116,6 +118,7 @@ var _ = ginkgo.Describe("[Feature: Real IP]", func() {
 			clientConf := consts.LegacyDefaultClientConfig
 
 			localPort := f.AllocPort()
+			var mu sync.Mutex
 			var srcAddrRecord string
 			localServer := streamserver.New(streamserver.TCP, streamserver.WithBindPort(localPort),
 				streamserver.WithCustomHandler(func(c net.Conn) {
@@ -126,7 +129,9 @@ var _ = ginkgo.Describe("[Feature: Real IP]", func() {
 						log.Errorf("read proxy protocol error: %v", err)
 						return
 					}
+					mu.Lock()
 					srcAddrRecord = ppHeader.SourceAddr.String()
+					mu.Unlock()
 				}))
 			f.RunServer("", localServer)
 
@@ -144,9 +149,17 @@ var _ = ginkgo.Describe("[Feature: Real IP]", func() {
 				r.HTTP().HTTPHost("normal.example.com")
 			}).Ensure(framework.ExpectResponseCode(404))
 
-			log.Tracef("proxy protocol get SourceAddr: %s", srcAddrRecord)
-			addr, err := net.ResolveTCPAddr("tcp", srcAddrRecord)
-			framework.ExpectNoError(err, srcAddrRecord)
+			var addrStr string
+			framework.Eventually(func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				addrStr = srcAddrRecord
+				return addrStr != ""
+			}, 5*time.Second, 50*time.Millisecond)
+
+			log.Tracef("proxy protocol get SourceAddr: %s", addrStr)
+			addr, err := net.ResolveTCPAddr("tcp", addrStr)
+			framework.ExpectNoError(err, addrStr)
 			framework.ExpectEqualValues("127.0.0.1", addr.IP.String())
 		})
 	})

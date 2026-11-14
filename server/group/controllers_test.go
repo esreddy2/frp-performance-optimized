@@ -125,9 +125,9 @@ func TestHTTPGroupControllerRoutingAndLifecycle(t *testing.T) {
 	cfg2 := makeRouteCfg("p2", "app.example.com", "/api", "alice")
 	require.ErrorIs(ctl.Register("p2", "http-grp", "wrong-key", cfg2), ErrGroupAuthFailed)
 
-	// Mismatched route config (domain, location, or routeByHTTPUser) is rejected
-	badDomainCfg := makeRouteCfg("p2", "other.example.com", "/api", "alice")
-	require.ErrorIs(ctl.Register("p2", "http-grp", "k1", badDomainCfg), ErrGroupParamsInvalid)
+	// Multi-domain registration in the same group succeeds (CANON-074)
+	otherDomainCfg := makeRouteCfg("p1", "other.example.com", "/api", "alice")
+	require.NoError(ctl.Register("p1", "http-grp", "k1", otherDomainCfg))
 
 	// Register second valid proxy
 	require.NoError(ctl.Register("p2", "http-grp", "k1", cfg2))
@@ -136,8 +136,13 @@ func TestHTTPGroupControllerRoutingAndLifecycle(t *testing.T) {
 	_, exist := routers.Get("app.example.com", "/api", "alice")
 	require.True(exist)
 
-	httpGrp, ok := ctl.get("http-grp")
+	key := httpGroupKey("http-grp", "app.example.com", "/api", "alice")
+	httpGrp, ok := ctl.groupRegistry.get(key)
 	require.True(ok)
+
+	// Mismatched route config directly on HTTPGroup is rejected
+	mismatchedCfg := makeRouteCfg("p3", "different.example.com", "/api", "alice")
+	require.ErrorIs(httpGrp.Register("p3", "http-grp", "k1", mismatchedCfg), ErrGroupParamsInvalid)
 
 	for range 4 {
 		c, err := httpGrp.createConn("10.0.0.1:12345")
@@ -204,7 +209,16 @@ func TestHTTPSGroupControllerAndTCPMuxGroupCtl(t *testing.T) {
 	_, err = httpsCtl.Listen(ctx, "https-grp", "bad-secret", routeCfg)
 	require.ErrorIs(err, ErrGroupAuthFailed)
 
-	_, err = httpsCtl.Listen(ctx, "https-grp", "secret", vhost.RouteConfig{Domain: "other.example.com"})
+	// Multi-domain HTTPS group registration succeeds (CANON-075)
+	otherRoute := vhost.RouteConfig{Domain: "other.example.com"}
+	hLnOther, err := httpsCtl.Listen(ctx, "https-grp", "secret", otherRoute)
+	require.NoError(err)
+	require.NoError(hLnOther.Close())
+
+	// Calling Listen directly on existing HTTPSGroup with mismatched parameters returns ErrGroupParamsInvalid
+	existingHTTPSGrp, ok := httpsCtl.get(httpsGroupKey("https-grp", routeCfg.Domain))
+	require.True(ok)
+	_, err = existingHTTPSGrp.Listen(ctx, "https-grp", "secret", otherRoute)
 	require.ErrorIs(err, ErrGroupParamsInvalid)
 
 	require.NoError(hLn1.Close())
@@ -245,4 +259,43 @@ func TestHTTPSGroupControllerAndTCPMuxGroupCtl(t *testing.T) {
 
 	require.NoError(mLn1.Close())
 	require.NoError(mLn2.Close())
+}
+
+func TestTCPGroupCtlUserIsolation(t *testing.T) {
+	require := require.New(t)
+
+	pm := ports.NewManager("tcp", "127.0.0.1", []types.PortsRange{
+		{Start: 41200, End: 41300},
+	})
+	defer pm.Close()
+
+	ctl := NewTCPGroupCtl(pm)
+	defer func() { _ = ctl.Close() }()
+
+	// 1. Unkeyed group created by user alice
+	lnAlice1, port1, err := ctl.Listen("alice.p1", "unkeyed-grp", "", "127.0.0.1", 0)
+	require.NoError(err)
+	defer lnAlice1.Close()
+
+	// Alice's second proxy joins unkeyed group successfully
+	lnAlice2, port2, err := ctl.Listen("alice.p2", "unkeyed-grp", "", "127.0.0.1", 0)
+	require.NoError(err)
+	require.Equal(port1, port2)
+	defer lnAlice2.Close()
+
+	// Bob attempts to infiltrate Alice's unkeyed group -> ErrGroupAuthFailed
+	_, _, err = ctl.Listen("bob.p1", "unkeyed-grp", "", "127.0.0.1", 0)
+	require.ErrorIs(err, ErrGroupAuthFailed)
+
+	// Anonymous proxy attempts to infiltrate Alice's unkeyed group -> ErrGroupAuthFailed
+	_, _, err = ctl.Listen("anon_proxy", "unkeyed-grp", "", "127.0.0.1", 0)
+	require.ErrorIs(err, ErrGroupAuthFailed)
+
+	// 2. Keyed group created by user alice: bob cannot join even if groupKey is provided
+	lnAliceKeyed, _, err := ctl.Listen("alice.keyed1", "keyed-grp", "alice-secret", "127.0.0.1", 0)
+	require.NoError(err)
+	defer lnAliceKeyed.Close()
+
+	_, _, err = ctl.Listen("bob.keyed1", "keyed-grp", "alice-secret", "127.0.0.1", 0)
+	require.ErrorIs(err, ErrGroupAuthFailed)
 }

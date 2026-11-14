@@ -18,7 +18,13 @@ package client
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -31,6 +37,41 @@ func init() {
 	Register(v1.PluginStaticFile, NewStaticFilePlugin)
 }
 
+type restrictedDir struct {
+	root string
+}
+
+func newRestrictedDir(root string) (*restrictedDir, error) {
+	if root == "" {
+		return nil, errors.New("static file plugin local_path cannot be empty")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("invalid local_path: %w", err)
+	}
+	evalRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve local_path: %w", err)
+	}
+	return &restrictedDir{root: evalRoot}, nil
+}
+
+func (d *restrictedDir) Open(name string) (http.File, error) {
+	if filepath.Separator != '/' && strings.ContainsRune(name, filepath.Separator) {
+		return nil, errors.New("http: invalid character in file path")
+	}
+	fullName := filepath.Join(d.root, filepath.FromSlash(path.Clean("/"+name)))
+	evalName, err := filepath.EvalSymlinks(fullName)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(d.root, evalName)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, os.ErrPermission
+	}
+	return os.Open(evalName)
+}
+
 type StaticFilePlugin struct {
 	opts *v1.StaticFilePluginOptions
 
@@ -41,6 +82,11 @@ type StaticFilePlugin struct {
 func NewStaticFilePlugin(_ PluginContext, options v1.ClientPluginOptions) (Plugin, error) {
 	opts := options.(*v1.StaticFilePluginOptions)
 
+	fs, err := newRestrictedDir(opts.LocalPath)
+	if err != nil {
+		return nil, err
+	}
+
 	listener := NewProxyListener()
 
 	sp := &StaticFilePlugin{
@@ -50,14 +96,19 @@ func NewStaticFilePlugin(_ PluginContext, options v1.ClientPluginOptions) (Plugi
 	}
 	var prefix string
 	if opts.StripPrefix != "" {
-		prefix = "/" + opts.StripPrefix + "/"
+		trimmed := strings.Trim(opts.StripPrefix, "/")
+		if trimmed != "" {
+			prefix = "/" + trimmed + "/"
+		} else {
+			prefix = "/"
+		}
 	} else {
 		prefix = "/"
 	}
 
 	router := mux.NewRouter()
 	router.Use(netpkg.NewHTTPAuthMiddleware(opts.HTTPUser, opts.HTTPPassword).SetAuthFailDelay(200 * time.Millisecond).Middleware)
-	router.PathPrefix(prefix).Handler(netpkg.MakeHTTPGzipHandler(http.StripPrefix(prefix, http.FileServer(http.Dir(opts.LocalPath))))).Methods("GET")
+	router.PathPrefix(prefix).Handler(netpkg.MakeHTTPGzipHandler(http.StripPrefix(prefix, http.FileServer(fs)))).Methods("GET", "HEAD")
 	sp.s = &http.Server{
 		Handler:           router,
 		ReadHeaderTimeout: 60 * time.Second,

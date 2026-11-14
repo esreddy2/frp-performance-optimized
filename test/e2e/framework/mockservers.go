@@ -15,6 +15,7 @@ import (
 const (
 	TCPEchoServerPort    = "TCPEchoServerPort"
 	UDPEchoServerPort    = "UDPEchoServerPort"
+	UDSEchoServerPort    = "UDSEchoServerPort"
 	UDSEchoServerAddr    = "UDSEchoServerAddr"
 	HTTPSimpleServerPort = "HTTPSimpleServerPort"
 )
@@ -24,6 +25,7 @@ type MockServers struct {
 	udpEchoServer    server.Server
 	udsEchoServer    server.Server
 	httpSimpleServer server.Server
+	udsPort          int
 }
 
 func NewMockServers(portAllocator *port.Allocator) *MockServers {
@@ -39,8 +41,8 @@ func NewMockServers(portAllocator *port.Allocator) *MockServers {
 		})),
 	)
 
-	udsIndex := portAllocator.Get()
-	udsAddr := fmt.Sprintf("%s/frp_echo_server_%d.sock", os.TempDir(), udsIndex)
+	s.udsPort = portAllocator.Get()
+	udsAddr := fmt.Sprintf("%s/frp_echo_server_%d.sock", os.TempDir(), s.udsPort)
 	os.Remove(udsAddr)
 	s.udsEchoServer = streamserver.New(streamserver.Unix, streamserver.WithBindAddr(udsAddr))
 	return s
@@ -67,10 +69,15 @@ func (m *MockServers) Close() {
 	os.Remove(m.udsEchoServer.BindAddr())
 }
 
+func (m *MockServers) UDSPort() int {
+	return m.udsPort
+}
+
 func (m *MockServers) GetTemplateParams() map[string]any {
 	ret := make(map[string]any)
 	ret[TCPEchoServerPort] = m.tcpEchoServer.BindPort()
 	ret[UDPEchoServerPort] = m.udpEchoServer.BindPort()
+	ret[UDSEchoServerPort] = m.udsPort
 	ret[UDSEchoServerAddr] = m.udsEchoServer.BindAddr()
 	ret[HTTPSimpleServerPort] = m.httpSimpleServer.BindPort()
 	return ret

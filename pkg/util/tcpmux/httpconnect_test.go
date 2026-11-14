@@ -204,7 +204,7 @@ func TestHTTPConnectTCPMuxerNonPassthroughRoutingAndAuth(t *testing.T) {
 	})
 
 	t.Run("non-CONNECT method is rejected", func(t *testing.T) {
-		_, _, _, err := muxer.readHTTPConnectRequest(strings.NewReader("GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n"))
+		_, _, _, _, err := muxer.readHTTPConnectRequest(strings.NewReader("GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n"))
 		require.ErrorContains(t, err, "must be of method CONNECT")
 	})
 }
@@ -247,4 +247,44 @@ func TestHTTPConnectTCPMuxerPassthroughForwardsConnectRequest(t *testing.T) {
 	_, err = io.ReadFull(br, trailing)
 	require.NoError(t, err)
 	require.Equal(t, "stream-data", string(trailing))
+}
+
+func TestHTTPConnectTCPMuxerNonPassthroughRetainsResidualEarlyData(t *testing.T) {
+	baseLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer baseLn.Close()
+
+	muxer, err := NewHTTPConnectTCPMuxer(baseLn, false, 2*time.Second)
+	require.NoError(t, err)
+
+	routeLn, err := muxer.Listen(t.Context(), &vhost.RouteConfig{
+		Domain: "early.example.com",
+	})
+	require.NoError(t, err)
+	defer routeLn.Close()
+
+	client, err := net.Dial("tcp", baseLn.Addr().String())
+	require.NoError(t, err)
+	defer client.Close()
+
+	earlyData := "early-tls-client-hello-data"
+	rawConnect := "CONNECT early.example.com:443 HTTP/1.1\r\nHost: early.example.com:443\r\n\r\n"
+	_, err = client.Write([]byte(rawConnect + earlyData))
+	require.NoError(t, err)
+
+	// Read 200 OK on client
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	backendConn, err := routeLn.Accept()
+	require.NoError(t, err)
+	defer backendConn.Close()
+
+	// In non-passthrough mode, the backend must receive the earlyData preserved from bufioReader
+	gotEarly := make([]byte, len(earlyData))
+	_, err = io.ReadFull(backendConn, gotEarly)
+	require.NoError(t, err)
+	require.Equal(t, earlyData, string(gotEarly))
 }

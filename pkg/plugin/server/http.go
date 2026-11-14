@@ -142,14 +142,19 @@ func (p *httpPlugin) do(ctx context.Context, r *Request, res *Response) error {
 	if err != nil {
 		return err
 	}
-	v := url.Values{}
-	v.Set("version", r.Version)
-	v.Set("op", r.Op)
-	req, err := http.NewRequest("POST", p.url+"?"+v.Encode(), bytes.NewReader(buf))
+	reqURL, err := url.Parse(p.url)
 	if err != nil {
 		return err
 	}
-	req = req.WithContext(ctx)
+	q := reqURL.Query()
+	q.Set("version", r.Version)
+	q.Set("op", r.Op)
+	reqURL.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL.String(), bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
 	req.Header.Set("X-Frp-Reqid", GetReqidFromContext(ctx))
 	req.Header.Set("Content-Type", "application/json")
 	client := p.client
@@ -177,7 +182,8 @@ func (p *httpPlugin) do(ctx context.Context, r *Request, res *Response) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("do http request error code: %d", resp.StatusCode)
 	}
-	buf, err = io.ReadAll(resp.Body)
+	const maxPluginResponseSize = 1 << 20 // 1MB
+	buf, err = io.ReadAll(io.LimitReader(resp.Body, maxPluginResponseSize))
 	if err != nil {
 		return err
 	}

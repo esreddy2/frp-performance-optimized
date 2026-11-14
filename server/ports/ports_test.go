@@ -176,3 +176,64 @@ func TestManagerAcquireErrorsAndUDPSupport(t *testing.T) {
 	require.Equal(p1, udpPort)
 	udpPM.Release(udpPort)
 }
+
+func TestManagerAcquireDoesNotAbortAfterFiveTries(t *testing.T) {
+	require := require.New(t)
+
+	// Bind 6 real listeners so 6 ports are busy
+	listeners := make([]net.Listener, 0, 6)
+	ranges := make([]types.PortsRange, 0, 7)
+	for range 6 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(err)
+		listeners = append(listeners, ln)
+		port := ln.Addr().(*net.TCPAddr).Port
+		ranges = append(ranges, types.PortsRange{Single: port})
+	}
+	defer func() {
+		for _, ln := range listeners {
+			_ = ln.Close()
+		}
+	}()
+
+	// Add 1 available port at the end
+	freeP := freeTCPPort(t)
+	ranges = append(ranges, types.PortsRange{Single: freeP})
+
+	pm := NewManager("tcp", "127.0.0.1", ranges)
+	defer pm.Close()
+
+	// Dynamic acquire must check past the first 5 busy ports and allocate freeP
+	got, err := pm.Acquire("p-more-than-5", 0)
+	require.NoError(err)
+	require.Equal(freeP, got)
+}
+
+func TestManagerReservedPortsUserIsolation(t *testing.T) {
+	require := require.New(t)
+
+	p1 := freeTCPPort(t)
+	p2 := freeTCPPort(t)
+	for p1 == p2 {
+		p2 = freeTCPPort(t)
+	}
+
+	pm := NewManager("tcp", "127.0.0.1", []types.PortsRange{{Single: p1}, {Single: p2}})
+	defer pm.Close()
+
+	// Alice acquires p1 and releases it (reserved for alice:app)
+	got, err := pm.Acquire("alice:app", p1)
+	require.NoError(err)
+	require.Equal(p1, got)
+	pm.Release(p1)
+
+	// Bob acquires dynamic port for bob:app -> must NOT get Alice's reserved port p1
+	bobGot, err := pm.Acquire("bob:app", 0)
+	require.NoError(err)
+	require.Equal(p2, bobGot)
+
+	// Alice acquires dynamic port for alice:app -> gets her reserved port p1
+	aliceGot, err := pm.Acquire("alice:app", 0)
+	require.NoError(err)
+	require.Equal(p1, aliceGot)
+}

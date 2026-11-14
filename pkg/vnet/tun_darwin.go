@@ -16,6 +16,7 @@ package vnet
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os/exec"
@@ -52,10 +53,17 @@ func openTun(_ context.Context, addr string) (tun.Device, error) {
 
 	// Calculate a peer IP for the point-to-point tunnel
 	peerIP := generatePeerIP(ip)
+	isIPv6 := ip.To4() == nil
 
 	// Configure the interface with proper point-to-point addressing
-	if err = exec.Command("ifconfig", name, "inet", ip.String(), peerIP.String(), "mtu", fmt.Sprint(defaultMTU), "up").Run(); err != nil {
-		return nil, err
+	if isIPv6 {
+		if err = exec.Command("ifconfig", name, "inet6", ip.String(), peerIP.String(), "mtu", fmt.Sprint(defaultMTU), "up").Run(); err != nil {
+			return nil, err
+		}
+	} else {
+		if err = exec.Command("ifconfig", name, "inet", ip.String(), peerIP.String(), "mtu", fmt.Sprint(defaultMTU), "up").Run(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Add default route for the tunnel subnet
@@ -68,15 +76,28 @@ func openTun(_ context.Context, addr string) (tun.Device, error) {
 }
 
 // generatePeerIP creates a peer IP for the point-to-point tunnel
-// by incrementing the last octet of the IP
+// using 32-bit integer arithmetic with boundary handling for IPv4
 func generatePeerIP(ip net.IP) net.IP {
-	// Make a copy to avoid modifying the original
+	if ip4 := ip.To4(); ip4 != nil {
+		val := binary.BigEndian.Uint32(ip4)
+		if val&0xff == 255 {
+			val--
+		} else {
+			val++
+		}
+		res := make(net.IP, 4)
+		binary.BigEndian.PutUint32(res, val)
+		return res
+	}
+
 	peerIP := make(net.IP, len(ip))
 	copy(peerIP, ip)
-
-	// Increment the last octet
-	peerIP[len(peerIP)-1]++
-
+	for i := len(peerIP) - 1; i >= 0; i-- {
+		peerIP[i]++
+		if peerIP[i] != 0 {
+			break
+		}
+	}
 	return peerIP
 }
 
@@ -84,7 +105,14 @@ func generatePeerIP(ip net.IP) net.IP {
 func addRoutes(ifName string, routes []net.IPNet) error {
 	for _, route := range routes {
 		routeStr := route.String()
-		if err := exec.Command("route", "add", "-net", routeStr, "-interface", ifName).Run(); err != nil {
+		isIPv6 := route.IP.To4() == nil
+		var cmd *exec.Cmd
+		if isIPv6 {
+			cmd = exec.Command("route", "add", "-inet6", "-net", routeStr, "-interface", ifName)
+		} else {
+			cmd = exec.Command("route", "add", "-net", routeStr, "-interface", ifName)
+		}
+		if err := cmd.Run(); err != nil {
 			return err
 		}
 	}

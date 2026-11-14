@@ -21,6 +21,7 @@ import (
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/tcpmux"
+	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/vhost"
 )
 
@@ -38,6 +39,10 @@ func NewTCPMuxGroupCtl(tcpMuxHTTPConnectMuxer *tcpmux.HTTPConnectTCPMuxer) *TCPM
 	}
 }
 
+func tcpMuxGroupKey(group, domain string) string {
+	return group + ":" + domain
+}
+
 // Listen is the wrapper for TCPMuxGroup's Listen.
 // If there is no group, one will be created.
 func (tmgc *TCPMuxGroupCtl) Listen(
@@ -45,8 +50,9 @@ func (tmgc *TCPMuxGroupCtl) Listen(
 	multiplexer, group, groupKey string,
 	routeConfig vhost.RouteConfig,
 ) (l net.Listener, err error) {
+	key := tcpMuxGroupKey(group, routeConfig.Domain)
 	for {
-		tcpMuxGroup := tmgc.getOrCreate(group, func() *TCPMuxGroup {
+		tcpMuxGroup := tmgc.getOrCreate(key, func() *TCPMuxGroup {
 			return NewTCPMuxGroup(tmgc)
 		})
 
@@ -91,7 +97,8 @@ func (tmg *TCPMuxGroup) HTTPConnectListen(
 ) (ln *Listener, err error) {
 	tmg.mu.Lock()
 	defer tmg.mu.Unlock()
-	if !tmg.ctl.isCurrent(group, func(cur *TCPMuxGroup) bool { return cur == tmg }) {
+	key := tcpMuxGroupKey(group, routeConfig.Domain)
+	if !tmg.ctl.isCurrent(key, func(cur *TCPMuxGroup) bool { return cur == tmg }) {
 		return nil, errGroupStale
 	}
 	if len(tmg.lns) == 0 {
@@ -106,7 +113,8 @@ func (tmg *TCPMuxGroup) HTTPConnectListen(
 		tmg.username = routeConfig.Username
 		tmg.password = routeConfig.Password
 		tmg.initBase(group, groupKey, tcpMuxLn, func() {
-			tmg.ctl.removeIf(tmg.group, func(cur *TCPMuxGroup) bool {
+			k := tcpMuxGroupKey(tmg.group, tmg.domain)
+			tmg.ctl.removeIf(k, func(cur *TCPMuxGroup) bool {
 				return cur == tmg
 			})
 		})
@@ -120,7 +128,7 @@ func (tmg *TCPMuxGroup) HTTPConnectListen(
 			tmg.password != routeConfig.Password {
 			return nil, ErrGroupParamsInvalid
 		}
-		if tmg.groupKey != groupKey {
+		if !util.ConstantTimeEqString(tmg.groupKey, groupKey) {
 			return nil, ErrGroupAuthFailed
 		}
 		ln = tmg.newListener(tmg.lns[0].Addr())

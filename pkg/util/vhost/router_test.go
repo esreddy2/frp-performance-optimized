@@ -255,3 +255,14 @@ func TestRoutersConcurrentGetByRouteAndAdd(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+func TestRoutersDelPrunesEmptyDomainKeys(t *testing.T) {
+	require := require.New(t)
+	routers := NewRouters()
+
+	require.NoError(routers.Add("app.example.com", "/api", "user1", "payload1"))
+	require.Contains(routers.indexByDomain, "app.example.com")
+
+	routers.Del("app.example.com", "/api", "user1")
+	require.NotContains(routers.indexByDomain, "app.example.com")
+}

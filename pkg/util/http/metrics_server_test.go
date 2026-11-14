@@ -109,3 +109,39 @@ func TestMetricsServerDisabled(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, s)
 }
+
+func TestMetricsServerAnonymousPprofDisallowed(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, ln.Close())
+
+	s, err := NewMetricsServer(v1.MetricsServerConfig{
+		Addr: "127.0.0.1", Port: port, PprofEnable: true,
+	}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("metrics-data"))
+	}))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+
+	// /healthz is accessible without auth
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	s.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// /metrics is accessible without auth in anonymous mode
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec = httptest.NewRecorder()
+	s.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "metrics-data", rec.Body.String())
+
+	// /debug/pprof/* endpoints MUST be disallowed (return 401 Unauthorized)
+	for _, p := range []string{"/debug/pprof/", "/debug/pprof/heap", "/debug/pprof/goroutine", "/debug/pprof/profile", "/debug/pprof/trace"} {
+		req = httptest.NewRequest(http.MethodGet, p, nil)
+		rec = httptest.NewRecorder()
+		s.router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code, "endpoint %s must disallow unauthenticated access", p)
+	}
+}

@@ -83,7 +83,7 @@ func TestInternalListenerOverflowClosesExcessConn(t *testing.T) {
 	// The 129th connection without a reader should not block and should be closed.
 	extraClient, extraPeer := net.Pipe()
 	defer extraPeer.Close()
-	require.NoError(t, l.PutConn(extraClient))
+	require.ErrorIs(t, l.PutConn(extraClient), ErrInternalListenerQueueFull)
 
 	_, err := extraPeer.Read(make([]byte, 1))
 	require.ErrorIs(t, err, io.EOF)

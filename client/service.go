@@ -513,11 +513,11 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 		svr.ctlMu.Unlock()
 		svr.reloadMu.Unlock()
 
-		ctl.Run(proxyCfgs, visitorCfgs)
-
 		if old != nil {
 			old.Close()
 		}
+
+		ctl.Run(proxyCfgs, visitorCfgs)
 		return true, nil
 	}
 

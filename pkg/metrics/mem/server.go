@@ -41,7 +41,7 @@ func init() {
 type serverMetrics struct {
 	info  *ServerStatistics
 	clock clock.WithTicker
-	mu    sync.Mutex
+	mu    sync.RWMutex
 }
 
 func newServerMetrics() *serverMetrics {
@@ -166,9 +166,9 @@ func (m *serverMetrics) CloseProxy(name string, proxyType string) {
 func (m *serverMetrics) OpenConnection(name string, _ string) {
 	m.info.CurConns.Inc(1)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
 	proxyStats, ok := m.info.ProxyStatistics[name]
+	m.mu.RUnlock()
 	if ok {
 		proxyStats.CurConns.Inc(1)
 	}
@@ -177,9 +177,9 @@ func (m *serverMetrics) OpenConnection(name string, _ string) {
 func (m *serverMetrics) CloseConnection(name string, _ string) {
 	m.info.CurConns.Dec(1)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
 	proxyStats, ok := m.info.ProxyStatistics[name]
+	m.mu.RUnlock()
 	if ok {
 		proxyStats.CurConns.Dec(1)
 	}
@@ -188,10 +188,10 @@ func (m *serverMetrics) CloseConnection(name string, _ string) {
 func (m *serverMetrics) AddTrafficIn(name string, _ string, trafficBytes int64) {
 	m.info.TotalTrafficIn.Inc(trafficBytes)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	proxyStats, ok := m.info.ProxyStatistics[name]
+	m.mu.RUnlock()
+
 	if ok {
 		proxyStats.TrafficIn.Inc(trafficBytes)
 	}
@@ -200,10 +200,10 @@ func (m *serverMetrics) AddTrafficIn(name string, _ string, trafficBytes int64) 
 func (m *serverMetrics) AddTrafficOut(name string, _ string, trafficBytes int64) {
 	m.info.TotalTrafficOut.Inc(trafficBytes)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	m.mu.RLock()
 	proxyStats, ok := m.info.ProxyStatistics[name]
+	m.mu.RUnlock()
+
 	if ok {
 		proxyStats.TrafficOut.Inc(trafficBytes)
 	}
@@ -212,8 +212,8 @@ func (m *serverMetrics) AddTrafficOut(name string, _ string, trafficBytes int64)
 // Get stats data api.
 
 func (m *serverMetrics) GetServer() *ServerStats {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	s := &ServerStats{
 		TotalTrafficIn:  m.info.TotalTrafficIn.TodayCount(),
 		TotalTrafficOut: m.info.TotalTrafficOut.TodayCount(),
@@ -250,8 +250,8 @@ func toProxyStats(name string, proxyStats *ProxyStatistics) *ProxyStats {
 
 func (m *serverMetrics) GetProxiesByType(proxyType string) []*ProxyStats {
 	res := make([]*ProxyStats, 0)
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	for name, proxyStats := range m.info.ProxyStatistics {
 		if proxyStats.ProxyType != proxyType {
@@ -263,8 +263,8 @@ func (m *serverMetrics) GetProxiesByType(proxyType string) []*ProxyStats {
 }
 
 func (m *serverMetrics) GetProxiesByTypeAndName(proxyType string, proxyName string) (res *ProxyStats) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	proxyStats, ok := m.info.ProxyStatistics[proxyName]
 	if ok && proxyStats.ProxyType == proxyType {
@@ -274,8 +274,8 @@ func (m *serverMetrics) GetProxiesByTypeAndName(proxyType string, proxyName stri
 }
 
 func (m *serverMetrics) GetProxyByName(proxyName string) (res *ProxyStats) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	proxyStats, ok := m.info.ProxyStatistics[proxyName]
 	if ok {
@@ -285,8 +285,8 @@ func (m *serverMetrics) GetProxyByName(proxyName string) (res *ProxyStats) {
 }
 
 func (m *serverMetrics) GetProxyTraffic(name string) (res *ProxyTrafficInfo) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	proxyStats, ok := m.info.ProxyStatistics[name]
 	if ok {

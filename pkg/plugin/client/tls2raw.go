@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"time"
 
 	libio "github.com/fatedier/golib/io"
 
@@ -60,12 +61,16 @@ func (p *TLS2RawPlugin) Handle(ctx context.Context, connInfo *ConnectionInfo) {
 	wrapConn := netpkg.WrapReadWriteCloserToConn(connInfo.Conn, connInfo.UnderlyingConn)
 	tlsConn := tls.Server(wrapConn, p.tlsConfig)
 
+	_ = wrapConn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := tlsConn.Handshake(); err != nil {
 		xl.Warnf("tls handshake error: %v", err)
 		tlsConn.Close()
 		return
 	}
-	rawConn, err := net.Dial("tcp", p.opts.LocalAddr)
+	_ = wrapConn.SetDeadline(time.Time{})
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	rawConn, err := dialer.DialContext(ctx, "tcp", p.opts.LocalAddr)
 	if err != nil {
 		xl.Warnf("dial to local addr error: %v", err)
 		tlsConn.Close()

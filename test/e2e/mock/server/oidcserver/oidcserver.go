@@ -225,12 +225,16 @@ func (s *Server) signJWT() (string, error) {
 		"kid": s.kid,
 		"typ": "JWT",
 	})
+	expDuration := 1 * time.Hour
+	if s.expiresIn > 0 {
+		expDuration = time.Duration(s.expiresIn) * time.Second
+	}
 	claims, _ := json.Marshal(map[string]any{
 		"iss": s.Issuer(),
 		"sub": s.subject,
 		"aud": s.audience,
 		"iat": now.Unix(),
-		"exp": now.Add(1 * time.Hour).Unix(),
+		"exp": now.Add(expDuration).Unix(),
 	})
 
 	headerB64 := base64.RawURLEncoding.EncodeToString(header)

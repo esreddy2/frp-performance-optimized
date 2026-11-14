@@ -160,7 +160,7 @@ func NewPortsRangeSliceFromString(str string) ([]PortsRange, error) {
 			if err != nil {
 				return nil, fmt.Errorf("range number is invalid, %v", err)
 			}
-			if singleNum < math.MinInt || singleNum > math.MaxInt {
+			if singleNum < 1 || singleNum > 65535 {
 				return nil, fmt.Errorf("range number is invalid")
 			}
 			out = append(out, PortsRange{Single: int(singleNum)})
@@ -174,10 +174,10 @@ func NewPortsRangeSliceFromString(str string) ([]PortsRange, error) {
 			if err != nil {
 				return nil, fmt.Errorf("range number is invalid, %v", err)
 			}
-			if maxNum < minNum {
+			if minNum < 1 || minNum > 65535 || maxNum < 1 || maxNum > 65535 {
 				return nil, fmt.Errorf("range number is invalid")
 			}
-			if minNum < math.MinInt || minNum > math.MaxInt || maxNum < math.MinInt || maxNum > math.MaxInt {
+			if maxNum < minNum {
 				return nil, fmt.Errorf("range number is invalid")
 			}
 			out = append(out, PortsRange{Start: int(minNum), End: int(maxNum)})

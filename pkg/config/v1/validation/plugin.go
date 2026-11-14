@@ -16,11 +16,15 @@ package validation
 
 import (
 	"errors"
+	"fmt"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 )
 
 func ValidateClientPluginOptions(c v1.ClientPluginOptions) error {
+	if c == nil {
+		return nil
+	}
 	switch v := c.(type) {
 	case *v1.HTTP2HTTPSPluginOptions:
 		return validateHTTP2HTTPSPluginOptions(v)
@@ -36,6 +40,22 @@ func ValidateClientPluginOptions(c v1.ClientPluginOptions) error {
 		return validateUnixDomainSocketPluginOptions(v)
 	case *v1.TLS2RawPluginOptions:
 		return validateTLS2RawPluginOptions(v)
+	case *v1.HTTPProxyPluginOptions, *v1.Socks5PluginOptions, *v1.VirtualNetPluginOptions:
+		return nil
+	default:
+		return fmt.Errorf("unknown client plugin options type: %T", c)
+	}
+}
+
+func ValidateTypedClientPluginOptions(c *v1.TypedClientPluginOptions) error {
+	if c == nil || c.Type == "" {
+		return nil
+	}
+	if !v1.IsValidClientPluginType(c.Type) {
+		return fmt.Errorf("unknown client plugin type: %s", c.Type)
+	}
+	if err := ValidateClientPluginOptions(c.ClientPluginOptions); err != nil {
+		return fmt.Errorf("plugin %s: %w", c.Type, err)
 	}
 	return nil
 }

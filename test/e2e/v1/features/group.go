@@ -132,6 +132,7 @@ var _ = ginkgo.Describe("[Feature: Group]", func() {
 		}
 		for range 10 {
 			wait.Go(func() {
+				defer ginkgo.GinkgoRecover()
 				expectFn()
 			})
 		}
@@ -207,7 +208,7 @@ var _ = ginkgo.Describe("[Feature: Group]", func() {
 			fooServer := httpserver.New(
 				httpserver.WithBindPort(fooPort),
 				httpserver.WithHandler(framework.SpecifiedHTTPBodyHandler([]byte("foo"))),
-				httpserver.WithTLSConfig(tlsConfig),
+				httpserver.WithTLSConfig(tlsConfig.Clone()),
 			)
 			f.RunServer("", fooServer)
 
@@ -215,7 +216,7 @@ var _ = ginkgo.Describe("[Feature: Group]", func() {
 			barServer := httpserver.New(
 				httpserver.WithBindPort(barPort),
 				httpserver.WithHandler(framework.SpecifiedHTTPBodyHandler([]byte("bar"))),
-				httpserver.WithTLSConfig(tlsConfig),
+				httpserver.WithTLSConfig(tlsConfig.Clone()),
 			)
 			f.RunServer("", barServer)
 

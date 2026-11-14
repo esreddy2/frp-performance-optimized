@@ -204,9 +204,6 @@ func startServiceWithAggregator(
 		return err
 	}
 
-	shouldGracefulClose := cfg.Transport.Protocol == "kcp" || cfg.Transport.Protocol == "quic"
-	if shouldGracefulClose {
-		go handleTermSignal(svr)
-	}
+	go handleTermSignal(svr)
 	return svr.Run(context.Background())
 }

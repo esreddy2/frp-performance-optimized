@@ -70,44 +70,67 @@ type Plugin interface {
 }
 
 type Listener struct {
-	conns  chan net.Conn
-	closed bool
-	mu     sync.Mutex
+	conns   chan net.Conn
+	closed  bool
+	closeCh chan struct{}
+	mu      sync.Mutex
 }
 
 func NewProxyListener() *Listener {
 	return &Listener{
-		conns: make(chan net.Conn, 64),
+		conns:   make(chan net.Conn, 64),
+		closeCh: make(chan struct{}),
 	}
 }
 
 func (l *Listener) Accept() (net.Conn, error) {
-	conn, ok := <-l.conns
-	if !ok {
+	select {
+	case conn, ok := <-l.conns:
+		if !ok {
+			return nil, fmt.Errorf("listener closed")
+		}
+		return conn, nil
+	case <-l.closeCh:
+		// Drain any remaining buffered connection
+		select {
+		case conn, ok := <-l.conns:
+			if ok {
+				return conn, nil
+			}
+		default:
+		}
 		return nil, fmt.Errorf("listener closed")
 	}
-	return conn, nil
 }
 
 func (l *Listener) PutConn(conn net.Conn) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed {
+		l.mu.Unlock()
 		if conn != nil {
 			_ = conn.Close()
 		}
 		return fmt.Errorf("listener closed")
 	}
-	l.conns <- conn
-	return nil
+	l.mu.Unlock()
+
+	select {
+	case l.conns <- conn:
+		return nil
+	case <-l.closeCh:
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return fmt.Errorf("listener closed")
+	}
 }
 
 func (l *Listener) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.closed {
-		close(l.conns)
 		l.closed = true
+		close(l.closeCh)
 	}
 	return nil
 }

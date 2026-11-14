@@ -53,6 +53,8 @@ func (a *Aggregator) ConfigSource() *ConfigSource {
 }
 
 func (a *Aggregator) StoreSource() *StoreSource {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.storeSource
 }
 

@@ -77,6 +77,10 @@ type MutableFeatureGate interface {
 	Add(features map[Feature]FeatureSpec) error
 	// String returns a string representing the feature gate configuration
 	String() string
+	// Close closes the feature gate and prevents further modification
+	Close()
+	// Freeze is an alias for Close, making the feature gate immutable
+	Freeze()
 }
 
 // featureGate implements the FeatureGate and MutableFeatureGate interfaces
@@ -101,10 +105,24 @@ func NewFeatureGate() MutableFeatureGate {
 	return f
 }
 
+func (f *featureGate) Close() {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	f.closed = true
+}
+
+func (f *featureGate) Freeze() {
+	f.Close()
+}
+
 // SetFromMap sets feature gate values from a map[string]bool
 func (f *featureGate) SetFromMap(m map[string]bool) error {
 	f.lock.Lock()
 	defer f.lock.Unlock()
+
+	if f.closed {
+		return fmt.Errorf("cannot set feature gates after the feature gate is closed")
+	}
 
 	// Copy existing state
 	known := maps.Clone(f.known.Load().(map[Feature]FeatureSpec))
@@ -206,4 +224,14 @@ func Enabled(name Feature) bool {
 // SetFromMap sets feature gate values from a map in the default feature gates
 func SetFromMap(featureMap map[string]bool) error {
 	return DefaultFeatureGates.SetFromMap(featureMap)
+}
+
+// Close closes the default feature gates
+func Close() {
+	DefaultFeatureGates.Close()
+}
+
+// Freeze freezes the default feature gates
+func Freeze() {
+	DefaultFeatureGates.Freeze()
 }

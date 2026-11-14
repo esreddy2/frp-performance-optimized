@@ -19,12 +19,18 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/pkg/util/version"
 )
 
-var NotFoundPagePath = ""
+var (
+	NotFoundPagePath = ""
+	notFoundCacheMu  sync.RWMutex
+	cachedPath       string
+	cachedContent    []byte
+)
 
 const (
 	NotFound = `<!DOCTYPE html>
@@ -51,19 +57,32 @@ Please try again later.</p>
 )
 
 func getNotFoundPageContent() []byte {
-	var (
-		buf []byte
-		err error
-	)
-	if NotFoundPagePath != "" {
-		buf, err = os.ReadFile(NotFoundPagePath)
-		if err != nil {
-			log.Warnf("read custom 404 page error: %v", err)
-			buf = []byte(NotFound)
-		}
-	} else {
+	path := NotFoundPagePath
+	if path == "" {
+		return []byte(NotFound)
+	}
+
+	notFoundCacheMu.RLock()
+	if path == cachedPath && cachedContent != nil {
+		content := cachedContent
+		notFoundCacheMu.RUnlock()
+		return content
+	}
+	notFoundCacheMu.RUnlock()
+
+	notFoundCacheMu.Lock()
+	defer notFoundCacheMu.Unlock()
+	if path == cachedPath && cachedContent != nil {
+		return cachedContent
+	}
+
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		log.Warnf("read custom 404 page error: %v", err)
 		buf = []byte(NotFound)
 	}
+	cachedPath = path
+	cachedContent = buf
 	return buf
 }
 

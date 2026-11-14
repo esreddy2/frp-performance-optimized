@@ -15,6 +15,9 @@
 package aggregate
 
 import (
+	"slices"
+	"sync"
+
 	"github.com/fatedier/frp/pkg/metrics/mem"
 	"github.com/fatedier/frp/pkg/metrics/prometheus"
 	"github.com/fatedier/frp/server/metrics"
@@ -37,56 +40,81 @@ func init() {
 }
 
 type serverMetrics struct {
+	mu sync.RWMutex
 	ms []metrics.ServerMetrics
 }
 
 func (m *serverMetrics) Add(sm metrics.ServerMetrics) {
+	if sm == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if slices.Contains(m.ms, sm) {
+		return
+	}
 	m.ms = append(m.ms, sm)
 }
 
 func (m *serverMetrics) NewClient() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, v := range m.ms {
 		v.NewClient()
 	}
 }
 
 func (m *serverMetrics) CloseClient() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, v := range m.ms {
 		v.CloseClient()
 	}
 }
 
 func (m *serverMetrics) NewProxy(name string, proxyType string, user string, clientID string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, v := range m.ms {
 		v.NewProxy(name, proxyType, user, clientID)
 	}
 }
 
 func (m *serverMetrics) CloseProxy(name string, proxyType string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, v := range m.ms {
 		v.CloseProxy(name, proxyType)
 	}
 }
 
 func (m *serverMetrics) OpenConnection(name string, proxyType string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, v := range m.ms {
 		v.OpenConnection(name, proxyType)
 	}
 }
 
 func (m *serverMetrics) CloseConnection(name string, proxyType string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, v := range m.ms {
 		v.CloseConnection(name, proxyType)
 	}
 }
 
 func (m *serverMetrics) AddTrafficIn(name string, proxyType string, trafficBytes int64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, v := range m.ms {
 		v.AddTrafficIn(name, proxyType, trafficBytes)
 	}
 }
 
 func (m *serverMetrics) AddTrafficOut(name string, proxyType string, trafficBytes int64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	for _, v := range m.ms {
 		v.AddTrafficOut(name, proxyType, trafficBytes)
 	}

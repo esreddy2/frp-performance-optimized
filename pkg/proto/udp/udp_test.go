@@ -107,6 +107,32 @@ func TestForwardUserConnStopsTheReaderOnTheStopChannel(t *testing.T) {
 	require.Error(err, "the reader of the forwarder was not stopped")
 }
 
+func TestForwardUserConnReturnsOnStopChannelWithoutUDPConnClose(t *testing.T) {
+	require := require.New(t)
+
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	readCh := make(chan *msg.UDPPacket)
+	sendCh := make(chan *msg.UDPPacket)
+	stopCh := make(chan struct{})
+
+	done := make(chan struct{})
+	go func() {
+		ForwardUserConn(service, readCh, sendCh, stopCh, 1500)
+		close(done)
+	}()
+
+	// Closing stopCh must cause ForwardUserConn to return without service.Close() being called
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ForwardUserConn did not return when stopCh was closed")
+	}
+}
+
 func TestForwardUserConnSkipsNilPacket(t *testing.T) {
 	require := require.New(t)
 
@@ -1028,5 +1054,90 @@ func TestForwarderProxyProtocolHeaderErrorDoesNotLeaveStaleFlow(t *testing.T) {
 				t.Fatal("ForwarderWithDone did not close done after stopCh")
 			}
 		})
+	}
+}
+
+func TestForwarderWithOptions_MaxFlowsEvictsLRU_CANON070(t *testing.T) {
+	require := require.New(t)
+
+	service, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	receivedPackets := make(chan string, 16)
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, _, readErr := service.ReadFromUDP(buf)
+			if readErr != nil {
+				return
+			}
+			receivedPackets <- string(buf[:n])
+		}
+	}()
+
+	readCh := make(chan *msg.UDPPacket, 16)
+	sendCh := make(chan msg.Message, 16)
+	stopCh := make(chan struct{})
+	t.Cleanup(func() {
+		close(readCh)
+	})
+
+	// Run forwarderWithOptions with MaxFlows: 2
+	done := forwarderWithOptions(
+		service.LocalAddr().(*net.UDPAddr),
+		readCh,
+		sendCh,
+		stopCh,
+		1500,
+		ForwarderOptions{MaxFlows: 2},
+		10*time.Second,
+	)
+
+	user1 := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 10001}
+	user2 := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 10002}
+	user3 := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 3), Port: 10003}
+
+	// 1. Send packet from user1
+	readCh <- NewUDPPacket([]byte("msg-from-user1"), nil, user1)
+	select {
+	case msg := <-receivedPackets:
+		require.Equal("msg-from-user1", msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for user1 packet")
+	}
+
+	// 2. Send packet from user2 (table now holds user1 and user2)
+	readCh <- NewUDPPacket([]byte("msg-from-user2"), nil, user2)
+	select {
+	case msg := <-receivedPackets:
+		require.Equal("msg-from-user2", msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for user2 packet")
+	}
+
+	// 3. Touch user1 again so user1 becomes MRU and user2 becomes LRU
+	readCh <- NewUDPPacket([]byte("msg2-from-user1"), nil, user1)
+	select {
+	case msg := <-receivedPackets:
+		require.Equal("msg2-from-user1", msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for user1 second packet")
+	}
+
+	// 4. Send packet from user3. Since MaxFlows is 2, user2 (LRU) must be evicted
+	readCh <- NewUDPPacket([]byte("msg-from-user3"), nil, user3)
+	select {
+	case msg := <-receivedPackets:
+		require.Equal("msg-from-user3", msg)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for user3 packet")
+	}
+
+	close(stopCh)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwarder did not exit cleanly")
 	}
 }

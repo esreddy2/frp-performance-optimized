@@ -310,3 +310,14 @@ func (rp *HTTPReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request)
 		rp.proxy.ServeHTTP(rw, newreq)
 	}
 }
+
+func (rp *HTTPReverseProxy) Close() {
+	if rp == nil {
+		return
+	}
+	if p, ok := rp.proxy.(*httputil.ReverseProxy); ok {
+		if tr, ok := p.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+	}
+}

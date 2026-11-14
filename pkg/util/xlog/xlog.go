@@ -89,7 +89,7 @@ func (l *Logger) AddPrefix(prefix LogPrefix) *Logger {
 // The caller must hold l.mu or exclusively own an unpublished logger.
 func (l *Logger) renderPrefixString() {
 	slices.SortStableFunc(l.prefixes, func(a, b LogPrefix) int {
-		return cmp.Compare(a.Priority, b.Priority)
+		return cmp.Compare(b.Priority, a.Priority)
 	})
 	var prefixString string
 	for _, v := range l.prefixes {
@@ -115,21 +115,21 @@ func (l *Logger) getPrefixString() string {
 }
 
 func (l *Logger) Errorf(format string, v ...any) {
-	log.Logger.WithPrefix(l.getPrefixString()).Errorf(format, v...)
+	log.CurrentLogger().WithPrefix(l.getPrefixString()).Errorf(format, v...)
 }
 
 func (l *Logger) Warnf(format string, v ...any) {
-	log.Logger.WithPrefix(l.getPrefixString()).Warnf(format, v...)
+	log.CurrentLogger().WithPrefix(l.getPrefixString()).Warnf(format, v...)
 }
 
 func (l *Logger) Infof(format string, v ...any) {
-	log.Logger.WithPrefix(l.getPrefixString()).Infof(format, v...)
+	log.CurrentLogger().WithPrefix(l.getPrefixString()).Infof(format, v...)
 }
 
 func (l *Logger) Debugf(format string, v ...any) {
-	log.Logger.WithPrefix(l.getPrefixString()).Debugf(format, v...)
+	log.CurrentLogger().WithPrefix(l.getPrefixString()).Debugf(format, v...)
 }
 
 func (l *Logger) Tracef(format string, v ...any) {
-	log.Logger.WithPrefix(l.getPrefixString()).Tracef(format, v...)
+	log.CurrentLogger().WithPrefix(l.getPrefixString()).Tracef(format, v...)
 }

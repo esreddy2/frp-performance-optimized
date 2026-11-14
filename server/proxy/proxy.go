@@ -154,6 +154,7 @@ type BaseProxy struct {
 	// datagrams when the work connection rides a QUIC connection.
 	udpDatagramWanted bool
 	udpDatagramStrict bool
+	closeCallback     func(proxyName string)
 
 	mu  sync.RWMutex
 	xl  *xlog.Logger
@@ -597,6 +598,7 @@ type Options struct {
 	EncryptionKey      []byte
 	WireProtocol       string
 	UDPPacketCodec     string
+	CloseCallback      func(proxyName string)
 }
 
 func NewProxy(ctx context.Context, options *Options) (pxy Proxy, err error) {
@@ -625,6 +627,7 @@ func NewProxy(ctx context.Context, options *Options) (pxy Proxy, err error) {
 		configurer:     configurer,
 		wireProtocol:   options.WireProtocol,
 		udpPacketCodec: options.UDPPacketCodec,
+		closeCallback:  options.CloseCallback,
 	}
 
 	factory := proxyFactoryRegistry[reflect.TypeOf(configurer)]

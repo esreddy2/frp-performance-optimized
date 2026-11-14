@@ -57,6 +57,7 @@ func validateFeatureGates(c *v1.ClientCommonConfig) (Warning, error) {
 	if err := gates.SetFromMap(c.FeatureGates); err != nil {
 		return nil, err
 	}
+	gates.Freeze()
 
 	if c.VirtualNet.Address != "" {
 		if !gates.Enabled(featuregate.VirtualNet) {
@@ -134,6 +135,8 @@ func (v *ConfigValidator) validateOIDCConfig(c *v1.AuthOIDCClientConfig) error {
 	if c.TokenSource.Type == "exec" {
 		if err := v.ValidateUnsafeFeature(security.TokenSourceExec); err != nil {
 			errs = AppendError(errs, err)
+		} else if c.TokenSource.Exec != nil {
+			c.TokenSource.Exec.Policy = v.unsafeFeatures
 		}
 	}
 	if err := c.TokenSource.Validate(); err != nil {

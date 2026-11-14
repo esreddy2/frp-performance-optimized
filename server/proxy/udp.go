@@ -108,7 +108,11 @@ func NewUDPProxy(baseProxy *BaseProxy) Proxy {
 
 func (pxy *UDPProxy) Run() (remoteAddr string, err error) {
 	xl := pxy.xl
-	pxy.realBindPort, err = pxy.rc.UDPPortManager.Acquire(pxy.name, pxy.cfg.RemotePort)
+	portName := pxy.name
+	if u := pxy.GetUserInfo().User; u != "" {
+		portName = u + ":" + pxy.name
+	}
+	pxy.realBindPort, err = pxy.rc.UDPPortManager.Acquire(portName, pxy.cfg.RemotePort)
 	if err != nil {
 		return "", fmt.Errorf("acquire port %d error: %v", pxy.cfg.RemotePort, err)
 	}
@@ -476,6 +480,9 @@ func (pxy *UDPProxy) runWithStreams(xl *xlog.Logger, udpConn *net.UDPConn) {
 	go func() {
 		udp.ForwardUserConn(udpConn, pxy.readCh, pxy.sendCh, pxy.stopCh, int(pxy.serverCfg.UDPPacketSize))
 		pxy.Close()
+		if pxy.closeCallback != nil {
+			pxy.closeCallback(pxy.GetName())
+		}
 	}()
 }
 

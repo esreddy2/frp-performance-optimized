@@ -710,3 +710,53 @@ remotePort = 6000
 	require.Equal(7000, clientCfg.ServerPort)
 	require.Len(clientCfg.Proxies, 1)
 }
+
+func TestGetValuesDynamicEnvironment(t *testing.T) {
+	require := require.New(t)
+
+	key := "FRP_DYNAMIC_TEST_VAR_12345"
+	val := "dynamic_value_98765"
+	t.Setenv(key, val)
+
+	values := GetValues()
+	require.NotNil(values)
+	require.Equal(val, values.Envs[key])
+}
+
+func TestLoadAdditionalClientConfigs_NestedWildcards(t *testing.T) {
+	require := require.New(t)
+
+	tmpDir := t.TempDir()
+	subDir1 := filepath.Join(tmpDir, "group1")
+	subDir2 := filepath.Join(tmpDir, "group2")
+	require.NoError(os.MkdirAll(subDir1, 0o755))
+	require.NoError(os.MkdirAll(subDir2, 0o755))
+
+	p1 := filepath.Join(subDir1, "p1.toml")
+	require.NoError(os.WriteFile(p1, []byte(`
+[[proxies]]
+name = "proxy-g1"
+type = "tcp"
+localPort = 8081
+remotePort = 9081
+`), 0o600))
+
+	p2 := filepath.Join(subDir2, "p2.toml")
+	require.NoError(os.WriteFile(p2, []byte(`
+[[proxies]]
+name = "proxy-g2"
+type = "tcp"
+localPort = 8082
+remotePort = 9082
+`), 0o600))
+
+	pattern := filepath.Join(tmpDir, "*", "*.toml")
+	proxies, visitors, err := LoadAdditionalClientConfigs([]string{pattern}, false, true)
+	require.NoError(err)
+	require.Len(proxies, 2)
+	require.Empty(visitors)
+
+	names := []string{proxies[0].GetBaseConfig().Name, proxies[1].GetBaseConfig().Name}
+	require.Contains(names, "proxy-g1")
+	require.Contains(names, "proxy-g2")
+}

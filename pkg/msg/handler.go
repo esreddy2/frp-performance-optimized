@@ -16,6 +16,7 @@ package msg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,8 @@ import (
 
 	"github.com/fatedier/frp/pkg/proto/wire"
 )
+
+var ErrSendQueueFull = errors.New("dispatcher send queue is full")
 
 type ReadWriter interface {
 	ReadMsg() (Message, error)
@@ -150,9 +153,9 @@ func (d *Dispatcher) Run() {
 	})
 }
 
-// stop rejects new sends and interrupts ReadMsg when supported by rw. Done remains
+// Stop rejects new sends and interrupts ReadMsg when supported by rw. Done remains
 // owned by readLoop so the control owner cannot clean up while a handler is running.
-func (d *Dispatcher) stop() {
+func (d *Dispatcher) Stop() {
 	d.stopOnce.Do(func() {
 		close(d.stopCh)
 		if conn, ok := d.rw.(interface{ SetReadDeadline(time.Time) error }); ok {
@@ -162,6 +165,10 @@ func (d *Dispatcher) stop() {
 			_ = closer.Close()
 		}
 	})
+}
+
+func (d *Dispatcher) stop() {
+	d.Stop()
 }
 
 func (d *Dispatcher) sendLoop() {
@@ -213,6 +220,9 @@ func (d *Dispatcher) Send(m Message) error {
 }
 
 func (d *Dispatcher) enqueue(m Message) error {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
 	select {
 	case <-d.stopCh:
 		return io.EOF
@@ -225,6 +235,8 @@ func (d *Dispatcher) enqueue(m Message) error {
 		default:
 			return nil
 		}
+	case <-timer.C:
+		return ErrSendQueueFull
 	}
 }
 

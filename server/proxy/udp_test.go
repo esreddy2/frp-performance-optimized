@@ -697,3 +697,55 @@ func generateProxyTestCertificate(t *testing.T) tls.Certificate {
 
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
+
+func TestUDPProxyForwarderExitInvokesCloseCallback(t *testing.T) {
+	require := require.New(t)
+
+	pm := ports.NewManager("udp", "127.0.0.1", nil)
+	defer pm.Close()
+
+	rc := &controller.ResourceController{
+		UDPPortManager: pm,
+	}
+
+	cfg := &v1.UDPProxyConfig{}
+	cfg.Name = "test-udp-cb"
+	cfg.Complete()
+
+	callbackCalled := make(chan string, 1)
+	base := &BaseProxy{
+		name:       cfg.Name,
+		rc:         rc,
+		serverCfg:  &v1.ServerConfig{ProxyBindAddr: "127.0.0.1", UDPPacketSize: 1500},
+		xl:         xlog.New(),
+		ctx:        context.Background(),
+		configurer: cfg,
+		closeCallback: func(name string) {
+			select {
+			case callbackCalled <- name:
+			default:
+			}
+		},
+		getWorkConnFn: func() (*WorkConn, error) {
+			return nil, errors.New("no work conn")
+		},
+	}
+
+	proxy, ok := NewUDPProxy(base).(*UDPProxy)
+	require.True(ok)
+
+	_, err := proxy.Run()
+	require.NoError(err)
+
+	// Close the udpConn to cause ForwardUserConn to exit
+	if proxy.udpConn != nil {
+		_ = proxy.udpConn.Close()
+	}
+
+	select {
+	case name := <-callbackCalled:
+		require.Equal("test-udp-cb", name)
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeCallback was not invoked upon ForwardUserConn exit")
+	}
+}

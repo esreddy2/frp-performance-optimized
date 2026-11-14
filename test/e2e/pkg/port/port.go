@@ -2,6 +2,7 @@ package port
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"sync"
@@ -22,6 +23,15 @@ func NewAllocator(from int, to int, mod int, index int) *Allocator {
 	pa := &Allocator{
 		reserved: sets.New[int](),
 		used:     sets.New[int](),
+	}
+
+	if mod <= 0 {
+		mod = 1
+	}
+	if index < 0 {
+		index = 0
+	} else {
+		index %= mod
 	}
 
 	for i := from; i <= to; i++ {
@@ -64,10 +74,11 @@ func (pa *Allocator) GetByName(portName string) int {
 			pa.used.Insert(port)
 			continue
 		}
-		l.Close()
+		_ = l.Close()
 
 		udpAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
 		if err != nil {
+			pa.used.Insert(port)
 			continue
 		}
 		udpConn, err := net.ListenUDP("udp", udpAddr)
@@ -76,10 +87,9 @@ func (pa *Allocator) GetByName(portName string) int {
 			pa.used.Insert(port)
 			continue
 		}
-		udpConn.Close()
+		_ = udpConn.Close()
 
 		pa.used.Insert(port)
-		pa.reserved.Delete(port)
 		return port
 	}
 	return 0
@@ -87,18 +97,29 @@ func (pa *Allocator) GetByName(portName string) int {
 
 func (pa *Allocator) getByRange(from, to int) int {
 	if from <= 0 {
-		port, _ := pa.reserved.PopAny()
+		port, ok := pa.reserved.PopAny()
+		if !ok {
+			return 0
+		}
 		return port
 	}
 
-	// choose a random port between from - to
+	// choose a port between from - to
+	var matching []int
 	ports := pa.reserved.UnsortedList()
 	for _, port := range ports {
 		if port >= from && port <= to {
-			return port
+			matching = append(matching, port)
 		}
 	}
-	return 0
+	if len(matching) == 0 {
+		return 0
+	}
+
+	// Pick randomly from matching ports to mitigate TOCTOU collision under concurrency
+	selected := matching[rand.IntN(len(matching))]
+	pa.reserved.Delete(selected)
+	return selected
 }
 
 func (pa *Allocator) Release(port int) {

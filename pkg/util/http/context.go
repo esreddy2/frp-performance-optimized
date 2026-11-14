@@ -44,7 +44,10 @@ func (c *Context) Query(key string) string {
 	return c.Req.URL.Query().Get(key)
 }
 
+const maxBodySize = 10 << 20 // 10MB
+
 func (c *Context) BindJSON(obj any) error {
+	c.Req.Body = http.MaxBytesReader(c.Resp, c.Req.Body, maxBodySize)
 	body, err := io.ReadAll(c.Req.Body)
 	if err != nil {
 		return err
@@ -53,5 +56,6 @@ func (c *Context) BindJSON(obj any) error {
 }
 
 func (c *Context) Body() ([]byte, error) {
+	c.Req.Body = http.MaxBytesReader(c.Resp, c.Req.Body, maxBodySize)
 	return io.ReadAll(c.Req.Body)
 }

@@ -380,3 +380,30 @@ func TestSTUNClientLeavesSocketAndDeadlineWithCaller(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, conn.localAddr.(*net.UDPAddr).Port, source.Port)
 }
+
+func TestDiscoverFallbackMultipleServers(t *testing.T) {
+	originalTimeout := responseTimeout
+	responseTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { responseTimeout = originalTimeout })
+
+	tmpConn := listenTestUDP4(t)
+	deadServerAddr := tmpConn.LocalAddr().String()
+	_ = tmpConn.Close()
+
+	liveServer := listenTestUDP4(t)
+	done := serveOneSTUNRequest(liveServer, func(request []byte, _ *net.UDPAddr) ([]byte, error) {
+		return makeTestSTUNResponse(request, testBindingSuccess,
+			testSTUNAttribute{typ: testAttrXORMapped, value: testIPv4AddressValue(net.ParseIP("198.51.100.20"), 45000, true)},
+		)
+	})
+
+	addresses, localAddr, err := Discover([]string{deadServerAddr, liveServer.LocalAddr().String()}, "")
+	require.NoError(t, err)
+	require.Len(t, addresses, 1)
+	require.Equal(t, "198.51.100.20:45000", addresses[0])
+	require.NotNil(t, localAddr)
+	waitSTUNExchange(t, done)
+
+	_, _, err = Discover([]string{deadServerAddr}, "")
+	require.Error(t, err)
+}

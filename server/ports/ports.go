@@ -114,18 +114,24 @@ func (pm *Manager) Acquire(name string, port int) (realPort int, err error) {
 
 	if port == 0 {
 		// get random port
-		count := 0
-		maxTryTimes := 5
+		var candidatePort int
 		for k := range pm.freePorts {
-			count++
-			if count > maxTryTimes {
-				break
-			}
 			if pm.isPortAvailable(k) {
-				realPort = k
-				pm.markPortAcquiredLocked(name, realPort, portCtx)
-				break
+				if !pm.isPortReservedByOtherLocked(k, name) {
+					realPort = k
+					pm.markPortAcquiredLocked(name, realPort, portCtx)
+					break
+				}
+				if candidatePort == 0 {
+					candidatePort = k
+				}
+				continue
 			}
+			delete(pm.freePorts, k)
+		}
+		if realPort == 0 && candidatePort != 0 {
+			realPort = candidatePort
+			pm.markPortAcquiredLocked(name, realPort, portCtx)
 		}
 		if realPort == 0 {
 			err = ErrNoAvailablePort
@@ -177,6 +183,17 @@ func (pm *Manager) isPortAvailable(port int) bool {
 	}
 	l.Close()
 	return true
+}
+
+func (pm *Manager) isPortReservedByOtherLocked(port int, name string) bool {
+	for resName, resCtx := range pm.reservedPorts {
+		if resCtx.Port == port && resName != name {
+			if resCtx.Closed && pm.clock.Since(resCtx.UpdateTime) <= MaxPortReservedDuration {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (pm *Manager) Release(port int) {

@@ -242,7 +242,7 @@ func RegisterServerConfigFlags(cmd *cobra.Command, c *v1.ServerConfig, opts ...R
 	cmd.PersistentFlags().StringVarP(&c.WebServer.Addr, "dashboard_addr", "", "127.0.0.1", "dashboard address")
 	cmd.PersistentFlags().IntVarP(&c.WebServer.Port, "dashboard_port", "", 0, "dashboard port")
 	cmd.PersistentFlags().StringVarP(&c.WebServer.User, "dashboard_user", "", "admin", "dashboard user (default is weak; change in production)")
-	cmd.PersistentFlags().StringVarP(&c.WebServer.Password, "dashboard_pwd", "", "change-me", "dashboard password (placeholder default; change in production)")
+	cmd.PersistentFlags().StringVarP(&c.WebServer.Password, "dashboard_pwd", "", "", "dashboard password")
 	cmd.PersistentFlags().BoolVarP(&c.EnablePrometheus, "enable_prometheus", "", false, "enable prometheus dashboard")
 	cmd.PersistentFlags().StringVarP(&c.Log.To, "log_file", "", "console", "log file")
 	cmd.PersistentFlags().StringVarP(&c.Log.Level, "log_level", "", "info", "log level")

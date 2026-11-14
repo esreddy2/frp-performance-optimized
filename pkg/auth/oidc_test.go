@@ -270,45 +270,96 @@ func (m *subjectTokenVerifier) Verify(_ context.Context, token string) (*oidc.ID
 	return &oidc.IDToken{Subject: subject}, nil
 }
 
-// The oidc verifier is built once per server and shared by every control
-// session, so the set of subjects that logged in is global. A ping that
-// carries the token of a subject that logged in on another session is
-// accepted.
-//
-// This is not an authorization or identity-isolation problem: the identity
-// and the privileges of a session are fixed by its login message and are
-// never derived from the subject set again. The subject set only decides
-// whether a message that carries a token is accepted, and a token that
-// verifies against the issuer and has a subject that logged in on this
-// server is a credential of that subject, whoever presents it.
-func TestPingWithTheSubjectOfAnotherSessionIsAccepted(t *testing.T) {
+// CANON-021: Cross-client session hijacking is prevented.
+// Each session verifier binds strictly to its authenticated subject,
+// ensuring Tenant B's token cannot authenticate against Tenant A's session.
+func TestCrossClientSessionHijackingPrevented(t *testing.T) {
 	r := require.New(t)
 
 	verifier := &subjectTokenVerifier{subjects: map[string]string{
 		"token-alice": "alice",
 		"token-bob":   "bob",
 	}}
-	consumer := auth.NewOidcAuthVerifier(
+	baseConsumer := auth.NewOidcAuthVerifier(
 		[]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns}, verifier)
 
-	// Another session of this server logs in as bob.
-	r.NoError(consumer.VerifyLogin(&msg.Login{PrivilegeKey: "token-bob"}))
+	// Alice logs into her session.
+	sessionAlice := baseConsumer.SessionVerifier()
+	r.NoError(sessionAlice.VerifyLogin(&msg.Login{PrivilegeKey: "token-alice"}))
+	r.Equal("alice", sessionAlice.Subject())
 
-	// The session that logged in as alice accepts a ping that carries bob's
-	// token, because the check is against the set of all subjects that
-	// logged in on this server.
-	r.NoError(consumer.VerifyPing(&msg.Ping{
-		PrivilegeKey: "token-bob",
+	// Bob logs into his session.
+	sessionBob := baseConsumer.SessionVerifier()
+	r.NoError(sessionBob.VerifyLogin(&msg.Login{PrivilegeKey: "token-bob"}))
+	r.Equal("bob", sessionBob.Subject())
+
+	// Alice's session accepts Alice's token.
+	r.NoError(sessionAlice.VerifyPing(&msg.Ping{
+		PrivilegeKey: "token-alice",
 		Timestamp:    time.Now().UnixMilli(),
 	}))
-	r.NoError(consumer.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "token-bob"}))
+	r.NoError(sessionAlice.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "token-alice"}))
 
-	// A subject that never logged in on this server is still rejected.
-	r.Error(consumer.VerifyPing(&msg.Ping{
+	// Bob's token cannot hijack Alice's session.
+	err := sessionAlice.VerifyPing(&msg.Ping{
+		PrivilegeKey: "token-bob",
+		Timestamp:    time.Now().UnixMilli(),
+	})
+	r.Error(err)
+	r.Contains(err.Error(), "received different OIDC subject in login and ping")
+
+	err = sessionAlice.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "token-bob"})
+	r.Error(err)
+	r.Contains(err.Error(), "received different OIDC subject in login and ping")
+
+	// Mallory (unauthenticated) is also rejected.
+	r.Error(sessionAlice.VerifyPing(&msg.Ping{
 		PrivilegeKey: "token-mallory",
 		Timestamp:    time.Now().UnixMilli(),
 	}))
-	r.Error(consumer.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "token-mallory"}))
+	r.Error(sessionAlice.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "token-mallory"}))
+}
+
+// CANON-034: ValueSource token resolution caching prevents process fork storms.
+func TestOidcTokenSourceAuthProviderCaching(t *testing.T) {
+	r := require.New(t)
+
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token.txt")
+	r.NoError(os.WriteFile(tokenFile, []byte("token-v1\n"), 0o600))
+
+	vs := &v1.ValueSource{
+		Type: "file",
+		File: &v1.FileSource{Path: tokenFile},
+	}
+	provider := auth.NewOidcTokenSourceAuthSetter(
+		[]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns},
+		vs,
+	)
+	// Set TTL to 1 second for test.
+	provider.SetTTL(500 * time.Millisecond)
+
+	loginMsg := &msg.Login{}
+	r.NoError(provider.SetLogin(loginMsg))
+	r.Equal("token-v1", loginMsg.PrivilegeKey)
+
+	// Update token file on disk. Because TTL is active, subsequent calls must reuse cached token.
+	r.NoError(os.WriteFile(tokenFile, []byte("token-v2\n"), 0o600))
+
+	pingMsg := &msg.Ping{}
+	r.NoError(provider.SetPing(pingMsg))
+	r.Equal("token-v1", pingMsg.PrivilegeKey, "must return cached token within TTL window")
+
+	workMsg := &msg.NewWorkConn{}
+	r.NoError(provider.SetNewWorkConn(workMsg))
+	r.Equal("token-v1", workMsg.PrivilegeKey, "must return cached token within TTL window")
+
+	// Wait for TTL to expire.
+	time.Sleep(600 * time.Millisecond)
+
+	workMsg2 := &msg.NewWorkConn{}
+	r.NoError(provider.SetNewWorkConn(workMsg2))
+	r.Equal("token-v2", workMsg2.PrivilegeKey, "must refresh token after TTL expires")
 }
 
 func TestOidcAuthProviderScopesAndCustomHTTPClient(t *testing.T) {
@@ -576,4 +627,52 @@ func TestOidcTokenSourceAuthProviderAndConsumerScopes(t *testing.T) {
 	)
 	r.ErrorContains(nilVerifierConsumer.VerifyLogin(&msg.Login{PrivilegeKey: "tok"}), "verifier is nil")
 	r.ErrorContains(nilVerifierConsumer.VerifyPing(&msg.Ping{PrivilegeKey: "tok"}), "verifier is nil")
+}
+
+func TestOidcEncryptionKeyDerivation(t *testing.T) {
+	r := require.New(t)
+
+	// 1. OIDC with Audience produces non-empty SHA256 derived key
+	caAud, err := auth.BuildClientAuth(&v1.AuthClientConfig{
+		Method: v1.AuthMethodOIDC,
+		OIDC: v1.AuthOIDCClientConfig{
+			Audience: "aud-12345",
+			TokenSource: &v1.ValueSource{
+				Type: "file",
+				File: &v1.FileSource{Path: "/dev/null"},
+			},
+		},
+	})
+	r.NoError(err)
+	r.NotEmpty(caAud.EncryptionKey())
+	r.Len(caAud.EncryptionKey(), 32)
+
+	// 2. Explicit Token overrides OIDC derivation
+	caExplicit, err := auth.BuildClientAuth(&v1.AuthClientConfig{
+		Method: v1.AuthMethodOIDC,
+		Token:  "explicit-token",
+		OIDC: v1.AuthOIDCClientConfig{
+			Audience: "aud-12345",
+			TokenSource: &v1.ValueSource{
+				Type: "file",
+				File: &v1.FileSource{Path: "/dev/null"},
+			},
+		},
+	})
+	r.NoError(err)
+	r.Equal([]byte("explicit-token"), caExplicit.EncryptionKey())
+
+	// 3. OIDC fallback without Audience produces non-empty key
+	caFallback, err := auth.BuildClientAuth(&v1.AuthClientConfig{
+		Method: v1.AuthMethodOIDC,
+		OIDC: v1.AuthOIDCClientConfig{
+			TokenSource: &v1.ValueSource{
+				Type: "file",
+				File: &v1.FileSource{Path: "/dev/null"},
+			},
+		},
+	})
+	r.NoError(err)
+	r.NotEmpty(caFallback.EncryptionKey())
+	r.Len(caFallback.EncryptionKey(), 32)
 }

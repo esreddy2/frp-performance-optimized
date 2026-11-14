@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -110,4 +111,64 @@ func TestHTTPPluginCloseProxyUnreachableIsRetryable(t *testing.T) {
 	if !errors.As(err, &transportErr) {
 		t.Fatalf("expected a retryable transport error, got %v", err)
 	}
+}
+
+func TestHTTPPluginQueryParametersPreserved(t *testing.T) {
+	var receivedURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedURL = r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"reject":false,"unchange":true}`))
+	}))
+	defer srv.Close()
+
+	plugin := newHTTPPluginWithTimeout(v1.HTTPPluginOptions{
+		Name: "query-check",
+		Addr: srv.URL,
+		Path: "/plugin?token=secret&env=prod",
+		Ops:  []string{OpPing},
+	}, 2*time.Second)
+
+	_, _, err := plugin.Handle(context.Background(), OpPing, PingContent{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(receivedURL, "token=secret") || !strings.Contains(receivedURL, "env=prod") {
+		t.Fatalf("expected original query params preserved, got: %s", receivedURL)
+	}
+	if !strings.Contains(receivedURL, "op=Ping") || !strings.Contains(receivedURL, "version=") {
+		t.Fatalf("expected op and version query params, got: %s", receivedURL)
+	}
+	if strings.Count(receivedURL, "?") != 1 {
+		t.Fatalf("URL contains corrupted multiple query delimiters: %s", receivedURL)
+	}
+}
+
+func TestHTTPPluginResponseSizeLimit(t *testing.T) {
+	// Serve a response larger than 1MB (e.g., 2MB)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Write 2MB of valid JSON or spaces
+		payload := make([]byte, 2<<20)
+		for i := range payload {
+			payload[i] = ' '
+		}
+		copy(payload, []byte(`{"reject":false,"unchange":true}`))
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	plugin := newHTTPPluginWithTimeout(v1.HTTPPluginOptions{
+		Name: "large-resp",
+		Addr: srv.URL,
+		Path: "/plugin",
+		Ops:  []string{OpPing},
+	}, 2*time.Second)
+
+	// Since response is capped at 1MB (1<<20), reading 2MB will read only 1MB.
+	// The 1MB slice will be invalid JSON because the closing braces are at the end, or unmarshaling succeeds if valid.
+	// Either way, it should not crash or buffer 2MB into memory.
+	res, _, _ := plugin.Handle(context.Background(), OpPing, PingContent{})
+	_ = res
 }

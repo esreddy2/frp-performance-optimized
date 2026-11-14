@@ -16,10 +16,32 @@ package validation
 
 import (
 	"fmt"
+	"net"
 	"slices"
+	"strings"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 )
+
+func normalizeAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" || addr == "0.0.0.0" {
+		return "0.0.0.0"
+	}
+	if ip := net.ParseIP(addr); ip != nil {
+		if ip.IsUnspecified() {
+			if ip.To4() != nil {
+				return "0.0.0.0"
+			}
+			return "::"
+		}
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4.String()
+		}
+		return ip.String()
+	}
+	return addr
+}
 
 func validateWebServerConfig(c *v1.WebServerConfig) error {
 	if c.TLS != nil {
@@ -49,10 +71,13 @@ func validateMetricsServerConfig(c *v1.MetricsServerConfig, web *v1.WebServerCon
 			return fmt.Errorf("metricsServer.tls.certFile and metricsServer.tls.keyFile must both be specified when tls is enabled")
 		}
 	}
-	// Only reject an exact duplicate. Whether two different addresses can share
+	if c.PprofEnable && (c.User == "" || c.Password == "") {
+		return fmt.Errorf("metricsServer.pprofEnable requires both user and password to be set")
+	}
+	// Only reject an exact duplicate (normalized). Whether two different addresses can share
 	// a port depends on the address family and the platform, so leave it to
 	// net.Listen to decide.
-	if c.Port > 0 && web.Port > 0 && c.Port == web.Port && c.Addr == web.Addr {
+	if c.Port > 0 && web.Port > 0 && c.Port == web.Port && normalizeAddr(c.Addr) == normalizeAddr(web.Addr) {
 		return fmt.Errorf("metricsServer.addr:port conflicts with webServer.addr:port")
 	}
 	return nil

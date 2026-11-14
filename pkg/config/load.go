@@ -52,13 +52,26 @@ func init() {
 	}
 }
 
+func getEnvs() map[string]string {
+	envs := os.Environ()
+	res := make(map[string]string, len(envs))
+	for _, env := range envs {
+		pair := strings.SplitN(env, "=", 2)
+		if len(pair) != 2 {
+			continue
+		}
+		res[pair[0]] = pair[1]
+	}
+	return res
+}
+
 type Values struct {
 	Envs map[string]string // environment vars
 }
 
 func GetValues() *Values {
 	return &Values{
-		Envs: glbEnvs,
+		Envs: getEnvs(),
 	}
 }
 
@@ -503,34 +516,53 @@ func LoadAdditionalClientConfigs(paths []string, isLegacyFormat bool, strict boo
 	proxyCfgs := make([]v1.ProxyConfigurer, 0)
 	visitorCfgs := make([]v1.VisitorConfigurer, 0)
 	for _, path := range paths {
-		absDir, err := filepath.Abs(filepath.Dir(path))
+		var matchedFiles []string
+
+		// Use filepath.Glob directly to support nested wildcard paths (e.g. */*.toml)
+		matches, err := filepath.Glob(path)
 		if err != nil {
 			return nil, nil, err
 		}
-		if _, err := os.Stat(absDir); os.IsNotExist(err) {
-			return nil, nil, err
+		matchedFiles = append(matchedFiles, matches...)
+
+		if len(matches) == 0 && !filepath.IsAbs(path) {
+			if abs, err := filepath.Abs(path); err == nil {
+				if absMatches, err := filepath.Glob(abs); err == nil {
+					matchedFiles = append(matchedFiles, absMatches...)
+				}
+			}
 		}
-		files, err := os.ReadDir(absDir)
-		if err != nil {
-			return nil, nil, err
+
+		if len(matchedFiles) == 0 {
+			absDir, err := filepath.Abs(path)
+			if err == nil {
+				if fi, err := os.Stat(absDir); err == nil && fi.IsDir() {
+					if dirMatches, err := filepath.Glob(filepath.Join(absDir, "*")); err == nil {
+						matchedFiles = append(matchedFiles, dirMatches...)
+					}
+				}
+			}
 		}
-		for _, fi := range files {
-			if fi.IsDir() {
+
+		for _, match := range matchedFiles {
+			fi, err := os.Stat(match)
+			if err != nil || fi.IsDir() {
 				continue
 			}
-			absFile := filepath.Join(absDir, fi.Name())
-			if matched, _ := filepath.Match(filepath.Join(absDir, filepath.Base(path)), absFile); matched {
-				// support yaml/json/toml
-				cfg := v1.ClientConfig{}
-				if err := LoadConfigureFromFile(absFile, &cfg, strict); err != nil {
-					return nil, nil, fmt.Errorf("load additional config from %s error: %v", absFile, err)
-				}
-				for _, c := range cfg.Proxies {
-					proxyCfgs = append(proxyCfgs, c.ProxyConfigurer)
-				}
-				for _, c := range cfg.Visitors {
-					visitorCfgs = append(visitorCfgs, c.VisitorConfigurer)
-				}
+			absFile, err := filepath.Abs(match)
+			if err != nil {
+				absFile = match
+			}
+			// support yaml/json/toml
+			cfg := v1.ClientConfig{}
+			if err := LoadConfigureFromFile(absFile, &cfg, strict); err != nil {
+				return nil, nil, fmt.Errorf("load additional config from %s error: %v", absFile, err)
+			}
+			for _, c := range cfg.Proxies {
+				proxyCfgs = append(proxyCfgs, c.ProxyConfigurer)
+			}
+			for _, c := range cfg.Visitors {
+				visitorCfgs = append(visitorCfgs, c.VisitorConfigurer)
 			}
 		}
 	}

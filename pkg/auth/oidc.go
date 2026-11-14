@@ -24,6 +24,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -229,24 +230,54 @@ type OidcTokenSourceAuthProvider struct {
 	additionalAuthScopes []v1.AuthScope
 
 	valueSource *v1.ValueSource
+
+	mu          sync.RWMutex
+	cachedToken string
+	cachedAt    time.Time
+	cacheTTL    time.Duration
 }
 
 func NewOidcTokenSourceAuthSetter(additionalAuthScopes []v1.AuthScope, valueSource *v1.ValueSource) *OidcTokenSourceAuthProvider {
 	return &OidcTokenSourceAuthProvider{
 		additionalAuthScopes: additionalAuthScopes,
 		valueSource:          valueSource,
+		cacheTTL:             10 * time.Second,
 	}
+}
+
+// SetTTL sets the token cache time-to-live.
+func (auth *OidcTokenSourceAuthProvider) SetTTL(ttl time.Duration) {
+	auth.mu.Lock()
+	defer auth.mu.Unlock()
+	auth.cacheTTL = ttl
 }
 
 func (auth *OidcTokenSourceAuthProvider) generateAccessToken() (accessToken string, err error) {
 	if auth.valueSource == nil {
 		return "", fmt.Errorf("couldn't acquire OIDC token for login: token source is nil")
 	}
+
+	auth.mu.RLock()
+	if auth.cachedToken != "" && time.Since(auth.cachedAt) < auth.cacheTTL {
+		cached := auth.cachedToken
+		auth.mu.RUnlock()
+		return cached, nil
+	}
+	auth.mu.RUnlock()
+
+	auth.mu.Lock()
+	defer auth.mu.Unlock()
+	if auth.cachedToken != "" && time.Since(auth.cachedAt) < auth.cacheTTL {
+		return auth.cachedToken, nil
+	}
+
 	ctx := context.Background()
 	accessToken, err = auth.valueSource.Resolve(ctx)
 	if err != nil {
 		return "", fmt.Errorf("couldn't acquire OIDC token for login: %v", err)
 	}
+	auth.cachedToken = accessToken
+	auth.cachedAt = time.Now()
 	return
 }
 
@@ -289,9 +320,9 @@ type TokenVerifier interface {
 type OidcAuthConsumer struct {
 	additionalAuthScopes []v1.AuthScope
 
-	verifier          TokenVerifier
-	mu                sync.RWMutex
-	subjectsFromLogin map[string]struct{}
+	verifier TokenVerifier
+	mu       sync.RWMutex
+	subject  string
 }
 
 func NewTokenVerifier(cfg v1.AuthOIDCServerConfig) (TokenVerifier, error) {
@@ -312,8 +343,36 @@ func NewOidcAuthVerifier(additionalAuthScopes []v1.AuthScope, verifier TokenVeri
 	return &OidcAuthConsumer{
 		additionalAuthScopes: additionalAuthScopes,
 		verifier:             verifier,
-		subjectsFromLogin:    make(map[string]struct{}),
 	}
+}
+
+// SessionVerifier returns a session-scoped OidcAuthConsumer sharing the same token verifier and scopes.
+func (auth *OidcAuthConsumer) SessionVerifier() *OidcAuthConsumer {
+	auth.mu.RLock()
+	defer auth.mu.RUnlock()
+	return &OidcAuthConsumer{
+		additionalAuthScopes: auth.additionalAuthScopes,
+		verifier:             auth.verifier,
+		subject:              auth.subject,
+	}
+}
+
+// WithSubject returns a new session-scoped OidcAuthConsumer with an explicitly bound subject.
+func (auth *OidcAuthConsumer) WithSubject(subject string) *OidcAuthConsumer {
+	auth.mu.RLock()
+	defer auth.mu.RUnlock()
+	return &OidcAuthConsumer{
+		additionalAuthScopes: auth.additionalAuthScopes,
+		verifier:             auth.verifier,
+		subject:              subject,
+	}
+}
+
+// Subject returns the authenticated subject for this consumer instance.
+func (auth *OidcAuthConsumer) Subject() string {
+	auth.mu.RLock()
+	defer auth.mu.RUnlock()
+	return auth.subject
 }
 
 func (auth *OidcAuthConsumer) VerifyLogin(loginMsg *msg.Login) (err error) {
@@ -331,7 +390,7 @@ func (auth *OidcAuthConsumer) VerifyLogin(loginMsg *msg.Login) (err error) {
 		return fmt.Errorf("invalid OIDC token in login: token is nil")
 	}
 	auth.mu.Lock()
-	auth.subjectsFromLogin[token.Subject] = struct{}{}
+	auth.subject = token.Subject
 	auth.mu.Unlock()
 	return nil
 }
@@ -348,9 +407,9 @@ func (auth *OidcAuthConsumer) verifyPostLoginToken(privilegeKey string) (err err
 		return fmt.Errorf("invalid OIDC token in ping: token is nil")
 	}
 	auth.mu.RLock()
-	_, ok := auth.subjectsFromLogin[token.Subject]
+	expected := auth.subject
 	auth.mu.RUnlock()
-	if !ok {
+	if expected == "" || token.Subject != expected {
 		return fmt.Errorf("received different OIDC subject in login and ping. "+
 			"new subject: %s",
 			token.Subject)

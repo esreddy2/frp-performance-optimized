@@ -18,6 +18,7 @@ import (
 	"context"
 	"net"
 
+	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/vhost"
 )
 
@@ -33,13 +34,18 @@ func NewHTTPSGroupController(httpsMuxer *vhost.HTTPSMuxer) *HTTPSGroupController
 	}
 }
 
+func httpsGroupKey(group, domain string) string {
+	return group + ":" + domain
+}
+
 func (ctl *HTTPSGroupController) Listen(
 	ctx context.Context,
 	group, groupKey string,
 	routeConfig vhost.RouteConfig,
 ) (l net.Listener, err error) {
+	key := httpsGroupKey(group, routeConfig.Domain)
 	for {
-		g := ctl.getOrCreate(group, func() *HTTPSGroup {
+		g := ctl.getOrCreate(key, func() *HTTPSGroup {
 			return NewHTTPSGroup(ctl)
 		})
 		l, err = g.Listen(ctx, group, groupKey, routeConfig)
@@ -70,10 +76,11 @@ func (g *HTTPSGroup) Listen(
 ) (ln *Listener, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.ctl.isCurrent(group, func(cur *HTTPSGroup) bool { return cur == g }) {
-		return nil, errGroupStale
-	}
+	key := httpsGroupKey(group, routeConfig.Domain)
 	if len(g.lns) == 0 {
+		if !g.ctl.isCurrent(key, func(cur *HTTPSGroup) bool { return cur == g }) {
+			return nil, errGroupStale
+		}
 		// the first listener, listen on the real address
 		httpsLn, errRet := g.ctl.httpsMuxer.Listen(ctx, &routeConfig)
 		if errRet != nil {
@@ -82,7 +89,8 @@ func (g *HTTPSGroup) Listen(
 
 		g.domain = routeConfig.Domain
 		g.initBase(group, groupKey, httpsLn, func() {
-			g.ctl.removeIf(g.group, func(cur *HTTPSGroup) bool {
+			k := httpsGroupKey(g.group, g.domain)
+			g.ctl.removeIf(k, func(cur *HTTPSGroup) bool {
 				return cur == g
 			})
 		})
@@ -93,7 +101,10 @@ func (g *HTTPSGroup) Listen(
 		if g.group != group || g.domain != routeConfig.Domain {
 			return nil, ErrGroupParamsInvalid
 		}
-		if g.groupKey != groupKey {
+		if !g.ctl.isCurrent(key, func(cur *HTTPSGroup) bool { return cur == g }) {
+			return nil, errGroupStale
+		}
+		if !util.ConstantTimeEqString(g.groupKey, groupKey) {
 			return nil, ErrGroupAuthFailed
 		}
 		ln = g.newListener(g.lns[0].Addr())

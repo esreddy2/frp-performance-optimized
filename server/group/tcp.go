@@ -17,7 +17,9 @@ package group
 import (
 	"net"
 	"strconv"
+	"strings"
 
+	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/server/ports"
 )
 
@@ -52,10 +54,21 @@ func (tgc *TCPGroupCtl) Listen(proxyName string, group string, groupKey string,
 	}
 }
 
+func extractUserFromProxyName(proxyName string) string {
+	if colon := strings.Index(proxyName, ":"); colon > 0 {
+		return proxyName[:colon]
+	}
+	if dot := strings.Index(proxyName, "."); dot > 0 {
+		return proxyName[:dot]
+	}
+	return ""
+}
+
 // TCPGroup routes connections to different proxies.
 type TCPGroup struct {
 	baseGroup
 
+	user     string
 	addr     string
 	port     int
 	realPort int
@@ -91,6 +104,7 @@ func (tg *TCPGroup) Listen(proxyName string, group string, groupKey string, addr
 			return
 		}
 
+		tg.user = extractUserFromProxyName(proxyName)
 		tg.addr = addr
 		tg.port = port
 		tg.realPort = realPort
@@ -112,7 +126,16 @@ func (tg *TCPGroup) Listen(proxyName string, group string, groupKey string, addr
 			err = ErrGroupDifferentPort
 			return
 		}
-		if tg.groupKey != groupKey {
+		if !util.ConstantTimeEqString(tg.groupKey, groupKey) {
+			err = ErrGroupAuthFailed
+			return
+		}
+		reqUser := extractUserFromProxyName(proxyName)
+		if tg.user != "" && reqUser != "" && tg.user != reqUser {
+			err = ErrGroupAuthFailed
+			return
+		}
+		if tg.groupKey == "" && (tg.user != "" || reqUser != "") && tg.user != reqUser {
 			err = ErrGroupAuthFailed
 			return
 		}

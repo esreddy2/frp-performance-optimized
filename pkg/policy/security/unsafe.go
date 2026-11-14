@@ -1,5 +1,7 @@
 package security
 
+import "context"
+
 const (
 	TokenSourceExec = "TokenSourceExec"
 )
@@ -31,4 +33,20 @@ func (u *UnsafeFeatures) IsEnabled(feature string) bool {
 		return false
 	}
 	return u.features[feature]
+}
+
+type contextKey struct{}
+
+func WithUnsafeFeatures(ctx context.Context, u *UnsafeFeatures) context.Context {
+	return context.WithValue(ctx, contextKey{}, u)
+}
+
+func FromContext(ctx context.Context) *UnsafeFeatures {
+	if ctx == nil {
+		return nil
+	}
+	if u, ok := ctx.Value(contextKey{}).(*UnsafeFeatures); ok {
+		return u
+	}
+	return nil
 }

@@ -57,8 +57,8 @@ func (cp *SelfSignedCertGenerator) Generate(commonName string) (*Artifacts, erro
 	hostIP := net.ParseIP(commonName)
 	var altIPs []net.IP
 	DNSNames := []string{"localhost"}
-	if hostIP.To4() != nil {
-		altIPs = append(altIPs, hostIP.To4())
+	if hostIP != nil {
+		altIPs = append(altIPs, hostIP)
 	} else {
 		DNSNames = append(DNSNames, commonName)
 	}

@@ -73,7 +73,11 @@ type tunDeviceWrapper struct {
 func (d *tunDeviceWrapper) Read(p []byte) (int, error) {
 	if len(d.packetBuffers) > 0 {
 		n := copy(p, d.packetBuffers[0])
-		d.packetBuffers = d.packetBuffers[1:]
+		if n < len(d.packetBuffers[0]) {
+			d.packetBuffers[0] = d.packetBuffers[0][n:]
+		} else {
+			d.packetBuffers = d.packetBuffers[1:]
+		}
 		return n, nil
 	}
 
@@ -96,18 +100,26 @@ func (d *tunDeviceWrapper) Read(p []byte) (int, error) {
 	}
 
 	dataSize := copy(p, d.packetBuffers[0])
-	d.packetBuffers = d.packetBuffers[1:]
+	if dataSize < len(d.packetBuffers[0]) {
+		d.packetBuffers[0] = d.packetBuffers[0][dataSize:]
+	} else {
+		d.packetBuffers = d.packetBuffers[1:]
+	}
 
 	return dataSize, nil
 }
 
 func (d *tunDeviceWrapper) Write(p []byte) (int, error) {
-	buf := pool.GetBuf(offset + d.bufferSize)
+	requiredSize := offset + len(p)
+	buf := pool.GetBuf(requiredSize)
 	defer pool.PutBuf(buf)
 
 	n := copy(buf[offset:], p)
 	_, err := d.dev.Write([][]byte{buf[:offset+n]}, offset)
-	return n, err
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (d *tunDeviceWrapper) Close() error {

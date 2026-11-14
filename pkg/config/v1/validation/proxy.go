@@ -76,10 +76,8 @@ func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
 		}
 	}
 
-	if c.Plugin.Type != "" {
-		if err := ValidateClientPluginOptions(c.Plugin.ClientPluginOptions); err != nil {
-			return fmt.Errorf("plugin %s: %v", c.Plugin.Type, err)
-		}
+	if err := ValidateTypedClientPluginOptions(&c.Plugin); err != nil {
+		return err
 	}
 	return nil
 }

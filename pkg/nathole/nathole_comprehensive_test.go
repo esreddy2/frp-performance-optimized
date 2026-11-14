@@ -407,3 +407,43 @@ func TestMakeHoleOverLoopbackUDP(t *testing.T) {
 	require.Equal(t, senderConn.LocalAddr().String(), rxRes.raddr.String())
 	require.Equal(t, receiverConn.LocalAddr().String(), txRes.raddr.String())
 }
+
+func TestControllerHandleVisitorSidChTimeout(t *testing.T) {
+	origTimeout := sendSidTimeout
+	sendSidTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { sendSidTimeout = origTimeout })
+
+	ctl, err := NewController(time.Hour)
+	require.NoError(t, err)
+	defer ctl.Close()
+
+	_, err = ctl.ListenClient("timeout-proxy", "valid-sk", []string{"user1"})
+	require.NoError(t, err)
+
+	respCh := make(chan *msg.NatHoleResp, 1)
+	tr := transport.NewMessageTransporter(funcSender{
+		sendFn: func(m msg.Message) error {
+			respCh <- m.(*msg.NatHoleResp)
+			return nil
+		},
+	})
+
+	now := time.Now().Unix()
+	ctl.HandleVisitor(&msg.NatHoleVisitor{
+		TransactionID: "tx-timeout",
+		ProxyName:     "timeout-proxy",
+		SignKey:       util.GetAuthKey("valid-sk", now),
+		Timestamp:     now,
+	}, tr, "user1")
+
+	select {
+	case resp := <-respCh:
+		require.Contains(t, resp.Error, "send sid to client failed")
+	case <-time.After(time.Second):
+		t.Fatal("HandleVisitor did not return within timeout")
+	}
+
+	ctl.mu.RLock()
+	require.Empty(t, ctl.sessions)
+	ctl.mu.RUnlock()
+}

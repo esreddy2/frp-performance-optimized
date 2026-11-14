@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -26,12 +28,12 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 		ginkgo.It("Auth for custom meta token", func() {
 			localPort := f.AllocPort()
 
-			clientAddressGot := false
+			var clientAddressGot atomic.Bool
 			handler := func(req *plugin.Request) *plugin.Response {
 				var ret plugin.Response
 				content := req.Content.(*plugin.LoginContent)
 				if content.ClientAddress != "" {
-					clientAddressGot = true
+					clientAddressGot.Store(true)
 				}
 				if content.Metas["token"] == "123" {
 					ret.Unchange = true
@@ -76,7 +78,7 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
 			framework.NewRequestExpect(f).Port(remotePort2).ExpectError(true).Ensure()
 
-			framework.ExpectTrue(clientAddressGot)
+			framework.ExpectTrue(clientAddressGot.Load())
 		})
 	})
 
@@ -168,11 +170,14 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 
 		ginkgo.It("Validate Info", func() {
 			localPort := f.AllocPort()
+			var mu sync.Mutex
 			var recordProxyName string
 			handler := func(req *plugin.Request) *plugin.Response {
 				var ret plugin.Response
 				content := req.Content.(*plugin.CloseProxyContent)
+				mu.Lock()
 				recordProxyName = content.ProxyName
+				mu.Unlock()
 				return &ret
 			}
 			pluginServer := pluginpkg.NewHTTPPluginServer(localPort, newFunc, handler, nil)
@@ -203,9 +208,11 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 				_ = c.Stop()
 			}
 
-			time.Sleep(1 * time.Second)
-
-			framework.ExpectEqual(recordProxyName, "tcp")
+			framework.Eventually(func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return recordProxyName == "tcp"
+			}, 5*time.Second, 50*time.Millisecond)
 		})
 	})
 
@@ -219,11 +226,14 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 		ginkgo.It("Validate Info", func() {
 			localPort := f.AllocPort()
 
+			var mu sync.Mutex
 			var record string
 			handler := func(req *plugin.Request) *plugin.Response {
 				var ret plugin.Response
 				content := req.Content.(*plugin.PingContent)
+				mu.Lock()
 				record = content.PrivilegeKey
+				mu.Unlock()
 				ret.Unchange = true
 				return &ret
 			}
@@ -254,8 +264,11 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
 
-			time.Sleep(3 * time.Second)
-			framework.ExpectNotEqual("", record)
+			framework.Eventually(func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return record != ""
+			}, 5*time.Second, 50*time.Millisecond)
 		})
 	})
 
@@ -269,11 +282,14 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 		ginkgo.It("Validate Info", func() {
 			localPort := f.AllocPort()
 
+			var mu sync.Mutex
 			var record string
 			handler := func(req *plugin.Request) *plugin.Response {
 				var ret plugin.Response
 				content := req.Content.(*plugin.NewWorkConnContent)
+				mu.Lock()
 				record = content.RunID
+				mu.Unlock()
 				ret.Unchange = true
 				return &ret
 			}
@@ -301,7 +317,11 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
 
-			framework.ExpectNotEqual("", record)
+			framework.Eventually(func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return record != ""
+			}, 5*time.Second, 50*time.Millisecond)
 		})
 	})
 
@@ -314,11 +334,14 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 		ginkgo.It("Validate Info", func() {
 			localPort := f.AllocPort()
 
+			var mu sync.Mutex
 			var record string
 			handler := func(req *plugin.Request) *plugin.Response {
 				var ret plugin.Response
 				content := req.Content.(*plugin.NewUserConnContent)
+				mu.Lock()
 				record = content.RemoteAddr
+				mu.Unlock()
 				ret.Unchange = true
 				return &ret
 			}
@@ -346,7 +369,11 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
 
-			framework.ExpectNotEqual("", record)
+			framework.Eventually(func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return record != ""
+			}, 5*time.Second, 50*time.Millisecond)
 		})
 	})
 
@@ -359,11 +386,14 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 		ginkgo.It("Validate Login Info, disable tls verify", func() {
 			localPort := f.AllocPort()
 
+			var mu sync.Mutex
 			var record string
 			handler := func(req *plugin.Request) *plugin.Response {
 				var ret plugin.Response
 				content := req.Content.(*plugin.NewUserConnContent)
+				mu.Lock()
 				record = content.RemoteAddr
+				mu.Unlock()
 				ret.Unchange = true
 				return &ret
 			}
@@ -393,7 +423,11 @@ var _ = ginkgo.Describe("[Feature: Server-Plugins]", func() {
 
 			framework.NewRequestExpect(f).Port(remotePort).Ensure()
 
-			framework.ExpectNotEqual("", record)
+			framework.Eventually(func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return record != ""
+			}, 5*time.Second, 50*time.Millisecond)
 		})
 	})
 })

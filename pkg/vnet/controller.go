@@ -42,13 +42,21 @@ type Controller struct {
 	tun          io.ReadWriteCloser
 	clientRouter *clientRouter // Route based on destination IP (client mode)
 	serverRouter *serverRouter // Route based on source IP (server mode)
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.Mutex
+	activeConns  map[io.Closer]struct{}
 }
 
 func NewController(cfg v1.VirtualNetConfig) *Controller {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Controller{
 		addr:         cfg.Address,
 		clientRouter: newClientRouter(),
 		serverRouter: newServerRouter(),
+		ctx:          ctx,
+		cancel:       cancel,
+		activeConns:  make(map[io.Closer]struct{}),
 	}
 }
 
@@ -65,6 +73,12 @@ func (c *Controller) Run() error {
 	conn := c.tun
 
 	for {
+		select {
+		case <-c.ctx.Done():
+			return c.ctx.Err()
+		default:
+		}
+
 		buf := pool.GetBuf(maxPacketSize)
 		n, err := conn.Read(buf)
 		if err != nil {
@@ -93,6 +107,19 @@ func (c *Controller) handlePacket(buf []byte) {
 			log.Warnf("parse ipv4 header error: %v", err)
 			return
 		}
+		// CANON-059: Decrement TTL before forwarding
+		if header.TTL <= 1 {
+			log.Tracef("packet from %s to %s dropped: TTL <= 1", header.Src, header.Dst)
+			return
+		}
+		header.TTL--
+		headerBytes, err := header.Marshal()
+		if err != nil {
+			log.Warnf("marshal ipv4 header error: %v", err)
+			return
+		}
+		copy(buf[:header.Len], headerBytes)
+
 		src = header.Src
 		dst = header.Dst
 		log.Tracef("%s >> %s %d/%-4d %-4x %d",
@@ -104,6 +131,15 @@ func (c *Controller) handlePacket(buf []byte) {
 			log.Warnf("parse ipv6 header error: %v", err)
 			return
 		}
+		// CANON-059: Decrement Hop Limit before forwarding
+		if header.HopLimit <= 1 {
+			log.Tracef("ipv6 packet from %s to %s dropped: HopLimit <= 1", header.Src, header.Dst)
+			return
+		}
+		if len(buf) >= 40 {
+			buf[7]--
+		}
+
 		src = header.Src
 		dst = header.Dst
 		log.Tracef("%s >> %s %d %d",
@@ -133,23 +169,60 @@ func (c *Controller) handlePacket(buf []byte) {
 	log.Tracef("no route found for packet from %s to %s", src, dst)
 }
 
+func (c *Controller) trackConn(conn io.Closer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.activeConns != nil {
+		c.activeConns[conn] = struct{}{}
+	}
+}
+
+func (c *Controller) untrackConn(conn io.Closer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.activeConns != nil {
+		delete(c.activeConns, conn)
+	}
+}
+
 func (c *Controller) Stop() error {
+	c.mu.Lock()
 	if c.tun == nil {
+		c.mu.Unlock()
 		return nil
 	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	for conn := range c.activeConns {
+		_ = conn.Close()
+	}
+	c.activeConns = make(map[io.Closer]struct{})
+	c.mu.Unlock()
+
 	return c.tun.Close()
 }
 
 // Client connection read loop
 func (c *Controller) readLoopClient(ctx context.Context, conn io.ReadWriteCloser) {
 	xl := xlog.FromContextSafe(ctx)
+	c.trackConn(conn)
 	defer func() {
+		c.untrackConn(conn)
 		// Remove the route when read loop ends (connection closed)
 		c.clientRouter.removeConnRoute(conn)
 		conn.Close()
 	}()
 
 	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		data, err := ReadMessage(conn)
 		if err != nil {
 			xl.Warnf("client read error: %v", err)
@@ -184,6 +257,14 @@ func (c *Controller) readLoopClient(ctx context.Context, conn io.ReadWriteCloser
 			continue
 		}
 
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		xl.Tracef("vnet write to tun (client) [%d]: %s", len(data), base64.StdEncoding.EncodeToString(data))
 		_, err = c.tun.Write(data)
 		if err != nil {
@@ -195,7 +276,9 @@ func (c *Controller) readLoopClient(ctx context.Context, conn io.ReadWriteCloser
 // Server connection read loop
 func (c *Controller) readLoopServer(ctx context.Context, conn io.ReadWriteCloser, onClose func()) {
 	xl := xlog.FromContextSafe(ctx)
+	c.trackConn(conn)
 	defer func() {
+		c.untrackConn(conn)
 		// Clean up all IP mappings associated with this connection when it closes
 		c.serverRouter.cleanupConnIPs(conn)
 		// Call the provided callback upon closure
@@ -206,6 +289,14 @@ func (c *Controller) readLoopServer(ctx context.Context, conn io.ReadWriteCloser
 	}()
 
 	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		data, err := ReadMessage(conn)
 		if err != nil {
 			xl.Warnf("server read error: %v", err)
@@ -217,6 +308,7 @@ func (c *Controller) readLoopServer(ctx context.Context, conn io.ReadWriteCloser
 		}
 
 		// Validate IP header and register source IP to connection mapping
+		var src net.IP
 		switch {
 		case waterutil.IsIPv4(data):
 			header, err := ipv4.ParseHeader(data)
@@ -224,17 +316,30 @@ func (c *Controller) readLoopServer(ctx context.Context, conn io.ReadWriteCloser
 				xl.Warnf("parse ipv4 header error: %v", err)
 				continue
 			}
-			c.serverRouter.registerSrcIP(header.Src, conn)
+			src = header.Src
 		case waterutil.IsIPv6(data):
 			header, err := ipv6.ParseHeader(data)
 			if err != nil {
 				xl.Warnf("parse ipv6 header error: %v", err)
 				continue
 			}
-			c.serverRouter.registerSrcIP(header.Src, conn)
+			src = header.Src
 		default:
 			xl.Tracef("unknown packet, discarded(%d)", len(data))
 			continue
+		}
+
+		if !c.validateAndRegisterSrcIP(src, conn) {
+			xl.Warnf("ingress filter dropped spoofed or hijacked packet from %s", src)
+			continue
+		}
+
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ctx.Done():
+			return
+		default:
 		}
 
 		xl.Tracef("vnet write to tun (server) [%d]: %s", len(data), base64.StdEncoding.EncodeToString(data))
@@ -243,6 +348,27 @@ func (c *Controller) readLoopServer(ctx context.Context, conn io.ReadWriteCloser
 			xl.Warnf("server write tun error: %v", err)
 		}
 	}
+}
+
+func (c *Controller) validateAndRegisterSrcIP(src net.IP, conn io.Writer) bool {
+	if src == nil || src.IsUnspecified() || src.IsMulticast() || src.IsLoopback() {
+		return false
+	}
+	if src.Equal(net.IPv4bcast) {
+		return false
+	}
+	if c.addr != "" {
+		if ip, _, err := net.ParseCIDR(c.addr); err == nil {
+			if src.Equal(ip) {
+				return false
+			}
+		} else if ip := net.ParseIP(c.addr); ip != nil {
+			if src.Equal(ip) {
+				return false
+			}
+		}
+	}
+	return c.serverRouter.registerSrcIP(src, conn)
 }
 
 // RegisterClientRoute registers a client route (based on destination IP CIDR)
@@ -354,16 +480,16 @@ func (r *serverRouter) findConnBySrc(src net.IP) (io.Writer, error) {
 	return conn, nil
 }
 
-func (r *serverRouter) registerSrcIP(src net.IP, conn io.Writer) {
+func (r *serverRouter) registerSrcIP(src net.IP, conn io.Writer) bool {
 	key := src.String()
 
 	r.mu.RLock()
 	existingConn, ok := r.srcIPConns[key]
 	r.mu.RUnlock()
 
-	// If the entry exists and the connection is the same, no need to do anything.
-	if ok && existingConn == conn {
-		return
+	// If the entry exists, only allow if belonging to the same connection.
+	if ok {
+		return existingConn == conn
 	}
 
 	// Acquire write lock to update the map.
@@ -372,11 +498,12 @@ func (r *serverRouter) registerSrcIP(src net.IP, conn io.Writer) {
 
 	// Double-check after acquiring the write lock to handle potential race conditions.
 	existingConn, ok = r.srcIPConns[key]
-	if ok && existingConn == conn {
-		return
+	if ok {
+		return existingConn == conn
 	}
 
 	r.srcIPConns[key] = conn
+	return true
 }
 
 // cleanupConnIPs removes all IP mappings associated with the specified connection

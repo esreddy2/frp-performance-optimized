@@ -508,6 +508,11 @@ type fakeVisitorConfigurer struct {
 
 func (f *fakeVisitorConfigurer) Clone() v1.VisitorConfigurer { return f }
 
+type fakePluginOptions struct{}
+
+func (f *fakePluginOptions) Complete()                     {}
+func (f *fakePluginOptions) Clone() v1.ClientPluginOptions { return f }
+
 func TestValidateAllProxyPluginsVisitorsAndServerRules(t *testing.T) {
 	require := require.New(t)
 
@@ -536,6 +541,12 @@ func TestValidateAllProxyPluginsVisitorsAndServerRules(t *testing.T) {
 	require.NoError(ValidateClientPluginOptions(&v1.HTTPProxyPluginOptions{}))
 	require.NoError(ValidateClientPluginOptions(&v1.Socks5PluginOptions{}))
 	require.NoError(ValidateClientPluginOptions(&v1.VirtualNetPluginOptions{}))
+	require.NoError(ValidateClientPluginOptions(nil))
+	require.ErrorContains(ValidateClientPluginOptions(&fakePluginOptions{}), "unknown client plugin options type")
+
+	require.NoError(ValidateTypedClientPluginOptions(nil))
+	require.NoError(ValidateTypedClientPluginOptions(&v1.TypedClientPluginOptions{}))
+	require.ErrorContains(ValidateTypedClientPluginOptions(&v1.TypedClientPluginOptions{Type: "unknown"}), "unknown client plugin type: unknown")
 
 	// 2. ValidateProxyConfigurerForClient across all proxy types and error paths
 	validBase := v1.ProxyBaseConfig{
@@ -572,6 +583,12 @@ func TestValidateAllProxyPluginsVisitorsAndServerRules(t *testing.T) {
 		ClientPluginOptions: &v1.StaticFilePluginOptions{},
 	}
 	require.ErrorContains(ValidateProxyConfigurerForClient(&v1.TCPProxyConfig{ProxyBaseConfig: badPlugin}, ""), "localPath is required")
+
+	badPluginType := validBase
+	badPluginType.Plugin = v1.TypedClientPluginOptions{
+		Type: "unknown_plugin",
+	}
+	require.ErrorContains(ValidateProxyConfigurerForClient(&v1.TCPProxyConfig{ProxyBaseConfig: badPluginType}, ""), "unknown client plugin type: unknown_plugin")
 
 	// TCP, STCP, XTCP, SUDP valid for client
 	require.NoError(ValidateProxyConfigurerForClient(&v1.TCPProxyConfig{ProxyBaseConfig: validBase}, ""))
@@ -690,12 +707,22 @@ func TestValidateAllProxyPluginsVisitorsAndServerRules(t *testing.T) {
 		VisitorBaseConfig: v1.VisitorBaseConfig{Name: "v1", ServerName: "s1"},
 	}), "bind port is required")
 
-	validVisitorBase := v1.VisitorBaseConfig{Name: "v1", ServerName: "s1", BindPort: 9000}
+	validVisitorBase := v1.VisitorBaseConfig{Name: "v1", ServerName: "s1", SecretKey: "secret", BindPort: 9000}
 	require.NoError(ValidateVisitorConfigurer(&v1.STCPVisitorConfig{VisitorBaseConfig: validVisitorBase}))
 	require.NoError(ValidateVisitorConfigurer(&v1.SUDPVisitorConfig{VisitorBaseConfig: validVisitorBase}))
 	require.NoError(ValidateVisitorConfigurer(&v1.XTCPVisitorConfig{VisitorBaseConfig: validVisitorBase, Protocol: "quic"}))
 	require.ErrorContains(ValidateVisitorConfigurer(&v1.XTCPVisitorConfig{VisitorBaseConfig: validVisitorBase, Protocol: "tcp"}), "protocol should be kcp or quic")
 	require.ErrorContains(ValidateVisitorConfigurer(&fakeVisitorConfigurer{VisitorBaseConfig: validVisitorBase}), "unknown visitor config type")
+
+	noSecretVisitor := validVisitorBase
+	noSecretVisitor.SecretKey = ""
+	require.ErrorContains(ValidateVisitorConfigurer(&v1.STCPVisitorConfig{VisitorBaseConfig: noSecretVisitor}), "secretKey is required")
+	require.ErrorContains(ValidateVisitorConfigurer(&v1.SUDPVisitorConfig{VisitorBaseConfig: noSecretVisitor}), "secretKey is required")
+
+	badPortVisitor := validVisitorBase
+	badPortVisitor.BindPort = -1
+	require.ErrorContains(ValidateVisitorConfigurer(&v1.STCPVisitorConfig{VisitorBaseConfig: badPortVisitor}), "bind port must be between 1 and 65535")
+	require.ErrorContains(ValidateVisitorConfigurer(&v1.SUDPVisitorConfig{VisitorBaseConfig: badPortVisitor}), "bind port must be between 1 and 65535")
 
 	badVisitorPlugin := validVisitorBase
 	badVisitorPlugin.Plugin = v1.TypedVisitorPluginOptions{
@@ -703,4 +730,21 @@ func TestValidateAllProxyPluginsVisitorsAndServerRules(t *testing.T) {
 		VisitorPluginOptions: &v1.VirtualNetVisitorPluginOptions{},
 	}
 	require.ErrorContains(ValidateVisitorConfigurer(&v1.STCPVisitorConfig{VisitorBaseConfig: badVisitorPlugin}), "destinationIP is required")
+
+	// STCP and SUDP visitors with plugins can specify BindPort = -1
+	pluginVisitor := validVisitorBase
+	pluginVisitor.BindPort = -1
+	pluginVisitor.Plugin = v1.TypedVisitorPluginOptions{
+		Type: v1.VisitorPluginVirtualNet,
+		VisitorPluginOptions: &v1.VirtualNetVisitorPluginOptions{
+			DestinationIP: "100.86.0.1",
+		},
+	}
+	require.NoError(ValidateVisitorConfigurer(&v1.STCPVisitorConfig{VisitorBaseConfig: pluginVisitor}))
+	require.NoError(ValidateVisitorConfigurer(&v1.SUDPVisitorConfig{VisitorBaseConfig: pluginVisitor}))
+
+	// Plugin visitor with port other than -1 and outside 1-65535 still fails
+	invalidPluginVisitorPort := pluginVisitor
+	invalidPluginVisitorPort.BindPort = -2
+	require.ErrorContains(ValidateVisitorConfigurer(&v1.STCPVisitorConfig{VisitorBaseConfig: invalidPluginVisitorPort}), "bind port must be between 1 and 65535")
 }

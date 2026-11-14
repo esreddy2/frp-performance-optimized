@@ -92,6 +92,17 @@ func NewGateway(
 		if !ok {
 			return nil, fmt.Errorf("unknown public key for remoteAddr %q", conn.RemoteAddr())
 		}
+		if user == "" {
+			fp := ssh.FingerprintSHA256(key)
+			cleanFP := strings.TrimPrefix(fp, "SHA256:")
+			cleanFP = strings.ReplaceAll(cleanFP, "/", "_")
+			cleanFP = strings.ReplaceAll(cleanFP, "+", "-")
+			cleanFP = strings.ReplaceAll(cleanFP, "=", "")
+			if len(cleanFP) > 12 {
+				cleanFP = cleanFP[:12]
+			}
+			user = "anon-" + cleanFP
+		}
 		return &ssh.Permissions{
 			Extensions: map[string]string{
 				"user": user,

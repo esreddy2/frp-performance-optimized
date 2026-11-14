@@ -119,6 +119,11 @@ func (hp *HTTPProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 func (hp *HTTPProxy) HTTPHandler(rw http.ResponseWriter, req *http.Request) {
 	removeProxyHeaders(req)
 
+	if isRestrictedDestination(req.URL.Hostname()) {
+		http.Error(rw, "destination not allowed", http.StatusForbidden)
+		return
+	}
+
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -163,6 +168,19 @@ func (hp *HTTPProxy) Auth(req *http.Request) bool {
 	return true
 }
 
+func isRestrictedDestination(host string) bool {
+	if strings.EqualFold(host, "instance-data") || strings.EqualFold(host, "metadata.google.internal") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return true
+		}
+	}
+	return false
+}
+
 func (hp *HTTPProxy) handleConnectReq(req *http.Request, rwc io.ReadWriteCloser) {
 	defer rwc.Close()
 	if ok := hp.Auth(req); !ok {
@@ -174,17 +192,44 @@ func (hp *HTTPProxy) handleConnectReq(req *http.Request, rwc io.ReadWriteCloser)
 		return
 	}
 
-	remote, err := net.Dial("tcp", req.URL.Host)
+	host, port, err := net.SplitHostPort(req.URL.Host)
 	if err != nil {
+		host = req.URL.Host
+		port = "80"
+	}
+
+	if isRestrictedDestination(host) {
 		res := &http.Response{
-			StatusCode: 400,
+			StatusCode: http.StatusForbidden,
+			Status:     "403 Forbidden",
 			Proto:      "HTTP/1.1",
 			ProtoMajor: 1,
 			ProtoMinor: 1,
+			Header:     make(http.Header),
 		}
+		res.Header.Set("Connection", "close")
 		_ = res.Write(rwc)
 		return
 	}
+
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+	}
+	remote, err := dialer.DialContext(req.Context(), "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		res := &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Status:     "502 Bad Gateway",
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+		}
+		res.Header.Set("Connection", "close")
+		_ = res.Write(rwc)
+		return
+	}
+	defer remote.Close()
 	_, _ = rwc.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
 
 	libio.Join(remote, rwc)

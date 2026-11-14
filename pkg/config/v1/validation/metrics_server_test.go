@@ -80,6 +80,20 @@ func TestValidateMetricsServerConfig(t *testing.T) {
 		checkMetricsConfigBoth(t, v1.MetricsServerConfig{Addr: "0.0.0.0", Port: 7501},
 			v1.WebServerConfig{Addr: "::", Port: 7501}, "")
 	})
+	t.Run("empty vs 0.0.0.0 normalized wildcard collision", func(t *testing.T) {
+		checkMetricsConfigBoth(t, v1.MetricsServerConfig{Addr: "", Port: 7501},
+			v1.WebServerConfig{Addr: "0.0.0.0", Port: 7501}, "conflicts with webServer")
+		checkMetricsConfigBoth(t, v1.MetricsServerConfig{Addr: "0.0.0.0", Port: 7501},
+			v1.WebServerConfig{Addr: "", Port: 7501}, "conflicts with webServer")
+	})
+	t.Run("pprof requires user and password", func(t *testing.T) {
+		checkMetricsConfigBoth(t, v1.MetricsServerConfig{Port: 7501, PprofEnable: true},
+			v1.WebServerConfig{}, "metricsServer.pprofEnable requires both user and password to be set")
+		checkMetricsConfigBoth(t, v1.MetricsServerConfig{Port: 7501, User: "admin", PprofEnable: true},
+			v1.WebServerConfig{}, "metricsServer.pprofEnable requires both user and password to be set")
+		checkMetricsConfigBoth(t, v1.MetricsServerConfig{Port: 7501, User: "admin", Password: "pwd", PprofEnable: true},
+			v1.WebServerConfig{}, "")
+	})
 }
 
 func checkMetricsConfigBoth(t *testing.T, metrics v1.MetricsServerConfig, web v1.WebServerConfig, wantErr string) {

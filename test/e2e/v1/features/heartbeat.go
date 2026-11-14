@@ -41,7 +41,10 @@ var _ = ginkgo.Describe("[Feature: Heartbeat]", func() {
 
 		framework.NewRequestExpect(f).Protocol("tcp").Port(remotePort).Ensure()
 
-		time.Sleep(5 * time.Second)
-		framework.NewRequestExpect(f).Protocol("tcp").Port(remotePort).Ensure()
+		// Verify connection remains alive across the keepalive interval (tcpMuxKeepaliveInterval = 2s)
+		for range 5 {
+			time.Sleep(1 * time.Second)
+			framework.NewRequestExpect(f).Protocol("tcp").Port(remotePort).Ensure()
+		}
 	})
 })

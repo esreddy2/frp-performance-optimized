@@ -47,11 +47,14 @@ func TestResourceControllerCloseInvokesManagersAndPropagatesErrors(t *testing.T)
 	natholeCtl, err := nathole.NewController(time.Second)
 	require.NoError(err)
 
+	rp := vhost.NewHTTPReverseProxy(vhost.HTTPReverseProxyOptions{}, vhost.NewRouters())
+
 	rc := &ResourceController{
 		TCPPortManager:         portMgr,
 		UDPPortManager:         udpPortMgr,
 		VhostHTTPSMuxer:        httpsMuxer,
 		TCPMuxHTTPConnectMuxer: tcpmuxMuxer,
+		HTTPReverseProxy:       rp,
 		VisitorManager:         visitor.NewManager(),
 		TCPGroupCtl:            group.NewTCPGroupCtl(portMgr),
 		HTTPGroupCtl:           group.NewHTTPGroupController(vhost.NewRouters()),

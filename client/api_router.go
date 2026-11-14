@@ -15,7 +15,11 @@
 package client
 
 import (
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 
 	adminapi "github.com/fatedier/frp/client/http"
 	"github.com/fatedier/frp/client/proxy"
@@ -32,6 +36,7 @@ func (svr *Service) registerRouteHandlers(helper *httppkg.RouterRegisterHelper) 
 	// API routes and static files with auth
 	subRouter := helper.Router.NewRoute().Subrouter()
 	subRouter.Use(helper.AuthMiddleware)
+	subRouter.Use(svr.csrfMiddleware)
 	subRouter.Use(httppkg.NewRequestLogger)
 	subRouter.HandleFunc("/api/reload", httppkg.MakeHTTPHandlerFunc(apiController.Reload)).Methods(http.MethodPost)
 	subRouter.HandleFunc("/api/stop", httppkg.MakeHTTPHandlerFunc(apiController.Stop)).Methods(http.MethodPost)
@@ -84,4 +89,76 @@ func (svr *Service) getAllProxyStatus() []*proxy.WorkingStatus {
 		return nil
 	}
 	return ctl.pm.GetAllProxyStatus()
+}
+
+// csrfMiddleware validates Origin, Referer, and Sec-Fetch-Site headers on
+// state-changing requests to protect against Cross-Site Request Forgery (CSRF).
+func (svr *Service) csrfMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Safe methods do not mutate state and are exempt from CSRF validation
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Reject modern browser cross-site fetch/form submissions
+		secFetchSite := r.Header.Get("Sec-Fetch-Site")
+		if secFetchSite == "cross-site" {
+			http.Error(w, "cross-site request rejected", http.StatusForbidden)
+			return
+		}
+
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			u, err := url.Parse(origin)
+			if err != nil || u.Host == "" {
+				http.Error(w, "invalid Origin header", http.StatusForbidden)
+				return
+			}
+			if !svr.isAllowedHost(u.Host, r.Host) {
+				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+				return
+			}
+		} else {
+			referer := r.Header.Get("Referer")
+			if referer != "" {
+				u, err := url.Parse(referer)
+				if err != nil || u.Host == "" {
+					http.Error(w, "invalid Referer header", http.StatusForbidden)
+					return
+				}
+				if !svr.isAllowedHost(u.Host, r.Host) {
+					http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+					return
+				}
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (svr *Service) isAllowedHost(candidateHost, requestHost string) bool {
+	if candidateHost == "" {
+		return false
+	}
+	if strings.EqualFold(candidateHost, requestHost) {
+		return true
+	}
+	wsCfg := svr.common.WebServer
+	if wsCfg.Port > 0 {
+		portStr := strconv.Itoa(wsCfg.Port)
+		if wsCfg.Addr != "" && strings.EqualFold(candidateHost, net.JoinHostPort(wsCfg.Addr, portStr)) {
+			return true
+		}
+		if wsCfg.Addr == "" || wsCfg.Addr == "0.0.0.0" || wsCfg.Addr == "127.0.0.1" || wsCfg.Addr == "::" || wsCfg.Addr == "::1" {
+			if strings.EqualFold(candidateHost, "127.0.0.1:"+portStr) ||
+				strings.EqualFold(candidateHost, "localhost:"+portStr) ||
+				strings.EqualFold(candidateHost, "[::1]:"+portStr) {
+				return true
+			}
+		}
+	}
+	return false
 }

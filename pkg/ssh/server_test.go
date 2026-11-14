@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -531,4 +532,147 @@ func TestGatewayAndTunnelServerEndToEnd(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "hello-from-ssh-client", string(data))
 	})
+}
+
+// CANON-045: User impersonation prohibited via --user flag
+func TestSSHUserImpersonationProhibited(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Generate client key 1 (with comment "alice")
+	pub1, priv1, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	sshPub1, err := cryptossh.NewPublicKey(pub1)
+	require.NoError(t, err)
+	signer1, err := cryptossh.NewSignerFromKey(priv1)
+	require.NoError(t, err)
+
+	authKeysPath := filepath.Join(tempDir, "authorized_keys")
+	keyLine := fmt.Sprintf("%s alice\n", strings.TrimSpace(string(cryptossh.MarshalAuthorizedKey(sshPub1))))
+	require.NoError(t, os.WriteFile(authKeysPath, []byte(keyLine), 0o600))
+
+	peerLn := netpkg.NewInternalListener()
+	defer peerLn.Close()
+
+	gw, err := NewGateway(v1.SSHTunnelGateway{
+		BindPort:           0,
+		AuthorizedKeysFile: authKeysPath,
+	}, "127.0.0.1", peerLn)
+	require.NoError(t, err)
+	go gw.Run()
+	defer gw.Close()
+
+	addr := gw.ln.Addr().String()
+
+	// 1. Authenticated user "alice" cannot specify --user "mallory"
+	t.Run("authenticated user cannot override identity", func(t *testing.T) {
+		client, err := cryptossh.Dial("tcp", addr, &cryptossh.ClientConfig{
+			User:            "alice",
+			Auth:            []cryptossh.AuthMethod{cryptossh.PublicKeys(signer1)},
+			HostKeyCallback: cryptossh.InsecureIgnoreHostKey(), //nolint:gosec // test-only local SSH client
+			Timeout:         2 * time.Second,
+		})
+		require.NoError(t, err)
+		defer client.Close()
+
+		ok, _, err := client.SendRequest(RequestTypeForward, true, cryptossh.Marshal(&tcpipForward{
+			Host: "127.0.0.1",
+			Port: 8080,
+		}))
+		require.NoError(t, err)
+		require.True(t, ok)
+
+		ch, reqs, err := client.OpenChannel("session", nil)
+		require.NoError(t, err)
+		defer ch.Close()
+		go cryptossh.DiscardRequests(reqs)
+
+		// Supply --user mallory attempting impersonation
+		_, err = ch.SendRequest("exec", true, cryptossh.Marshal(&execPayload{Command: "tcp --remote_port 6000 --user mallory"}))
+		require.NoError(t, err)
+
+		buf := make([]byte, 1024)
+		n, err := ch.Read(buf)
+		require.NoError(t, err)
+		require.Contains(t, string(buf[:n]), "cannot override authenticated user")
+	})
+
+	// 2. Unauthenticated gateway rejects client-provided --user
+	t.Run("unauthenticated client cannot specify --user", func(t *testing.T) {
+		peerLn2 := netpkg.NewInternalListener()
+		defer peerLn2.Close()
+		gwNoAuth, err := NewGateway(v1.SSHTunnelGateway{BindPort: 0}, "127.0.0.1", peerLn2)
+		require.NoError(t, err)
+		go gwNoAuth.Run()
+		defer gwNoAuth.Close()
+
+		noAuthAddr := gwNoAuth.ln.Addr().String()
+
+		client, err := cryptossh.Dial("tcp", noAuthAddr, &cryptossh.ClientConfig{
+			User:            "anon",
+			HostKeyCallback: cryptossh.InsecureIgnoreHostKey(), //nolint:gosec // test-only local SSH client
+			Timeout:         2 * time.Second,
+		})
+		require.NoError(t, err)
+		defer client.Close()
+
+		ok, _, err := client.SendRequest(RequestTypeForward, true, cryptossh.Marshal(&tcpipForward{
+			Host: "127.0.0.1",
+			Port: 8080,
+		}))
+		require.NoError(t, err)
+		require.True(t, ok)
+
+		ch, reqs, err := client.OpenChannel("session", nil)
+		require.NoError(t, err)
+		defer ch.Close()
+		go cryptossh.DiscardRequests(reqs)
+
+		_, err = ch.SendRequest("exec", true, cryptossh.Marshal(&execPayload{Command: "tcp --remote_port 6000 --user root"}))
+		require.NoError(t, err)
+
+		buf := make([]byte, 1024)
+		n, err := ch.Read(buf)
+		require.NoError(t, err)
+		require.Contains(t, string(buf[:n]), "cannot specify --user")
+	})
+}
+
+// CANON-052: Continuous request draining for OpenSSH keepalives
+func TestSSHRequestsContinuousDrainKeepalive(t *testing.T) {
+	peerLn := netpkg.NewInternalListener()
+	defer peerLn.Close()
+
+	gw, err := NewGateway(v1.SSHTunnelGateway{BindPort: 0}, "127.0.0.1", peerLn)
+	require.NoError(t, err)
+	go gw.Run()
+	defer gw.Close()
+
+	addr := gw.ln.Addr().String()
+
+	client, err := dialTestSSHClient(t, addr)
+	require.NoError(t, err)
+	defer client.Close()
+
+	ok, _, err := client.SendRequest(RequestTypeForward, true, cryptossh.Marshal(&tcpipForward{
+		Host: "127.0.0.1",
+		Port: 8080,
+	}))
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	ch, reqs, err := client.OpenChannel("session", nil)
+	require.NoError(t, err)
+	defer ch.Close()
+	go cryptossh.DiscardRequests(reqs)
+
+	ok, err = ch.SendRequest("exec", true, cryptossh.Marshal(&execPayload{Command: "tcp -r 6000"}))
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Send 30 keepalive requests (channel buffer is 16, so >16 would block without continuous draining)
+	for range 30 {
+		replyOk, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+		require.NoError(t, err)
+		require.True(t, replyOk)
+	}
 }

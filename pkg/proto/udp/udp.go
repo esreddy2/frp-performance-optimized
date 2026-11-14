@@ -15,6 +15,7 @@
 package udp
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"net"
@@ -89,6 +90,16 @@ func forwardUserConn(
 	buf := pool.GetBuf(bufSize)
 	defer pool.PutBuf(buf)
 
+	stopWait := make(chan struct{})
+	defer close(stopWait)
+	go func() {
+		select {
+		case <-stopCh:
+			_ = udpConn.SetReadDeadline(time.Now())
+		case <-stopWait:
+		}
+	}()
+
 	// Wrap the write loop in a function that recovers from send-on-closed-channel panic.
 	func() {
 		defer func() {
@@ -116,15 +127,36 @@ func forwardUserConn(
 // new socket.
 const udpSocketIdleTimeout = 30 * time.Second
 
+// defaultMaxFlows is the maximum number of concurrent UDP flow sockets maintained
+// in the forwarder flow table before oldest/LRU sockets are evicted.
+const defaultMaxFlows = 1024
+
 // removeUDPConn drops conn from the flow map, but only when it is still the
 // socket registered for addr. A socket that has already been replaced must
 // not drop its replacement from the map: the flow would then start a second
 // socket for the same user while the first one is still alive.
 func removeUDPConn(udpConnMap map[string]*net.UDPConn, mu *sync.RWMutex, addr string, conn *net.UDPConn) {
+	removeUDPConnWithLRU(udpConnMap, nil, nil, mu, addr, conn)
+}
+
+func removeUDPConnWithLRU(
+	udpConnMap map[string]*net.UDPConn,
+	flowOrder map[string]*list.Element,
+	lruList *list.List,
+	mu *sync.RWMutex,
+	addr string,
+	conn *net.UDPConn,
+) {
 	mu.Lock()
 	defer mu.Unlock()
 	if current, ok := udpConnMap[addr]; ok && current == conn {
 		delete(udpConnMap, addr)
+		if flowOrder != nil && lruList != nil {
+			if elem, exists := flowOrder[addr]; exists {
+				lruList.Remove(elem)
+				delete(flowOrder, addr)
+			}
+		}
 	}
 }
 
@@ -145,6 +177,7 @@ type ForwarderOptions struct {
 	ProxyProtocol     string
 	ProxyProtocolMode string
 	SocketMark        int
+	MaxFlows          int
 	OnError           func(err error, raddr net.Addr, dstAddr net.Addr)
 }
 
@@ -230,7 +263,14 @@ func forwarderWithOptions(
 	done := make(chan struct{})
 	var mu sync.RWMutex
 	udpConnMap := make(map[string]*net.UDPConn)
+	flowOrder := make(map[string]*list.Element)
+	lruList := list.New()
 	var writerWg sync.WaitGroup
+
+	maxFlows := options.MaxFlows
+	if maxFlows <= 0 {
+		maxFlows = defaultMaxFlows
+	}
 
 	closeAllConns := func() {
 		mu.Lock()
@@ -238,6 +278,8 @@ func forwarderWithOptions(
 			_ = conn.Close()
 		}
 		clear(udpConnMap)
+		clear(flowOrder)
+		lruList.Init()
 		mu.Unlock()
 	}
 
@@ -246,7 +288,7 @@ func forwarderWithOptions(
 		defer writerWg.Done()
 		addr := raddr.String()
 		defer func() {
-			removeUDPConn(udpConnMap, &mu, addr, udpConn)
+			removeUDPConnWithLRU(udpConnMap, flowOrder, lruList, &mu, addr, udpConn)
 			udpConn.Close()
 		}()
 
@@ -321,9 +363,15 @@ func forwarderWithOptions(
 					continue
 				}
 
-				mu.RLock()
-				udpConn, ok := udpConnMap[udpMsg.RemoteAddr.String()]
-				mu.RUnlock()
+				addrStr := udpMsg.RemoteAddr.String()
+				mu.Lock()
+				udpConn, ok := udpConnMap[addrStr]
+				if ok {
+					if elem, hasElem := flowOrder[addrStr]; hasElem {
+						lruList.MoveToFront(elem)
+					}
+				}
+				mu.Unlock()
 
 				// Build the proxy protocol header before creating/registering a new flow
 				// so a header-construction failure does not leave a stale flow in udpConnMap.
@@ -366,11 +414,31 @@ func forwarderWithOptions(
 					isNewFlow := false
 					mu.Lock()
 					// Double-check after acquiring write lock.
-					if existing, exists := udpConnMap[udpMsg.RemoteAddr.String()]; exists {
-						udpConn.Close()
+					if existing, exists := udpConnMap[addrStr]; exists {
+						_ = udpConn.Close()
 						udpConn = existing
+						if elem, hasElem := flowOrder[addrStr]; hasElem {
+							lruList.MoveToFront(elem)
+						}
 					} else {
-						udpConnMap[udpMsg.RemoteAddr.String()] = udpConn
+						// Flow table capacity check: evict LRU flow if table is full
+						for len(udpConnMap) >= maxFlows {
+							oldestElem := lruList.Back()
+							if oldestElem == nil {
+								break
+							}
+							oldestAddr := oldestElem.Value.(string)
+							lruList.Remove(oldestElem)
+							delete(flowOrder, oldestAddr)
+							if oldConn, hasOld := udpConnMap[oldestAddr]; hasOld {
+								delete(udpConnMap, oldestAddr)
+								_ = oldConn.Close()
+							}
+						}
+
+						elem := lruList.PushFront(addrStr)
+						flowOrder[addrStr] = elem
+						udpConnMap[addrStr] = udpConn
 						isNewFlow = true
 					}
 					mu.Unlock()
@@ -404,7 +472,7 @@ func forwarderWithOptions(
 				}
 				if err != nil {
 					udpConn.Close()
-					removeUDPConn(udpConnMap, &mu, udpMsg.RemoteAddr.String(), udpConn)
+					removeUDPConnWithLRU(udpConnMap, flowOrder, lruList, &mu, addrStr, udpConn)
 				} else {
 					// Reset the idle deadline only when a write succeeds. Doing this
 					// per packet is fine here because writes are relatively infrequent

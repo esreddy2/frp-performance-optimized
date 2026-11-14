@@ -134,7 +134,15 @@ var _ = ginkgo.Describe("[Feature: Group Advanced]", func() {
 
 			// Close bar server, check only foo is returned
 			barServer.Close()
-			time.Sleep(2 * time.Second)
+			framework.Eventually(func() bool {
+				for range 10 {
+					resp, err := request.New().Port(remotePort).Do()
+					if err != nil || string(resp.Content) != "foo" {
+						return false
+					}
+				}
+				return true
+			}, 10*time.Second, 100*time.Millisecond)
 			results = make([]string, 0, 10)
 			for range 10 {
 				framework.NewRequestExpect(f).Port(remotePort).ExpectResp([]byte("foo")).Ensure()
@@ -143,8 +151,23 @@ var _ = ginkgo.Describe("[Feature: Group Advanced]", func() {
 			framework.ExpectNotContainElements(results, []string{"bar"})
 
 			// Resume bar server, check both are returned
+			barServer = streamserver.New(streamserver.TCP, streamserver.WithBindPort(barPort), streamserver.WithRespContent([]byte("bar")))
 			f.RunServer("", barServer)
-			time.Sleep(2 * time.Second)
+			framework.Eventually(func() bool {
+				var hasFoo, hasBar bool
+				for range 20 {
+					resp, err := request.New().Port(remotePort).Do()
+					if err == nil {
+						if string(resp.Content) == "foo" {
+							hasFoo = true
+						}
+						if string(resp.Content) == "bar" {
+							hasBar = true
+						}
+					}
+				}
+				return hasFoo && hasBar
+			}, 10*time.Second, 100*time.Millisecond)
 			results = []string{}
 			for range 10 {
 				framework.NewRequestExpect(f).Port(remotePort).Ensure(func(resp *request.Response) bool {

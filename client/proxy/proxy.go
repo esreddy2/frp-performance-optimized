@@ -143,6 +143,16 @@ func (pxy *BaseProxy) Run() error {
 				pxy.baseCfg.Plugin.Type,
 			)
 		}
+		pxy.mu.Lock()
+		if pxy.proxyPlugin != nil {
+			old := pxy.proxyPlugin
+			pxy.proxyPlugin = nil
+			pxy.mu.Unlock()
+			old.Close()
+		} else {
+			pxy.mu.Unlock()
+		}
+
 		p, err := plugin.Create(pxy.baseCfg.Plugin.Type, plugin.PluginContext{
 			Name:           pxy.baseCfg.Name,
 			VnetController: pxy.vnetController,

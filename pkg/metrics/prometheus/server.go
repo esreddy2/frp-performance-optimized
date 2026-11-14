@@ -37,7 +37,10 @@ func (m *serverMetrics) NewProxy(name string, proxyType string, _ string, _ stri
 
 func (m *serverMetrics) CloseProxy(name string, proxyType string) {
 	m.proxyCount.WithLabelValues(proxyType).Dec()
-	m.proxyCountDetailed.WithLabelValues(proxyType, name).Dec()
+	m.proxyCountDetailed.DeleteLabelValues(proxyType, name)
+	m.connectionCount.DeleteLabelValues(name, proxyType)
+	m.trafficIn.DeleteLabelValues(name, proxyType)
+	m.trafficOut.DeleteLabelValues(name, proxyType)
 }
 
 func (m *serverMetrics) OpenConnection(name string, proxyType string) {

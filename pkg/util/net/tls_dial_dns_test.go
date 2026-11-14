@@ -15,15 +15,21 @@
 package net
 
 import (
+	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"io"
+	"math/big"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/fatedier/frp/pkg/transport"
 )
 
 func TestSetDefaultDNSAddress(t *testing.T) {
@@ -115,13 +121,65 @@ func TestDialHookWebsocketWithWebsocketListener(t *testing.T) {
 	_, err = io.ReadFull(wsServer, got)
 	require.NoError(t, err)
 	require.Equal(t, binaryPayload, got)
+
+	// Verify WSS scheme sets https:// origin in HTTP upgrade request
+	c1, c2 := net.Pipe()
+	originCh := make(chan string, 1)
+	go func() {
+		defer c2.Close()
+		req, _ := http.ReadRequest(bufio.NewReader(c2))
+		if req != nil {
+			originCh <- req.Header.Get("Origin")
+		}
+	}()
+	hookWSS := DialHookWebsocket("wss", "example.com:443")
+	_, _, _ = hookWSS(t.Context(), c1, "example.com:443")
+	_ = c1.Close()
+
+	select {
+	case origin := <-originCh:
+		require.Equal(t, "https://example.com:443", origin)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Origin header")
+	}
+}
+
+func testTLSConfigs(t *testing.T) (*tls.Config, *tls.Config) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"example.com"},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	cert := tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  key,
+	}
+	pool := x509.NewCertPool()
+	leaf, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+	pool.AddCert(leaf)
+
+	serverTLS := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+	clientTLS := &tls.Config{
+		ServerName: "example.com",
+		RootCAs:    pool,
+	}
+	return serverTLS, clientTLS
 }
 
 func TestCheckAndEnableTLSServerConnWithTimeout(t *testing.T) {
-	serverTLS, err := transport.NewServerTLSConfig("", "", "")
-	require.NoError(t, err)
-	clientTLS, err := transport.NewClientTLSConfig("", "", "", "example.com")
-	require.NoError(t, err)
+	serverTLS, clientTLS := testTLSConfigs(t)
 
 	t.Run("custom FRP TLS head byte completes handshake and transfers data", func(t *testing.T) {
 		cClient, cServer := net.Pipe()

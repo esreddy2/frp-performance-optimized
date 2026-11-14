@@ -158,3 +158,12 @@ func TestClientRegistrySameRunIDMovesBetweenClientKeys(t *testing.T) {
 		t.Fatalf("new client key was not registered: %+v", newInfo)
 	}
 }
+
+func TestClientRegistryComposeClientKeyNoCollision(t *testing.T) {
+	cr := NewClientRegistry()
+	k1 := cr.composeClientKey("corp.alice", "dev")
+	k2 := cr.composeClientKey("corp", "alice.dev")
+	if k1 == k2 {
+		t.Fatalf("expected distinct keys for (corp.alice, dev) and (corp, alice.dev), got collision: %s", k1)
+	}
+}

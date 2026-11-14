@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync"
 
 	libnet "github.com/fatedier/frp/pkg/util/net"
 	"github.com/fatedier/frp/test/e2e/pkg/rpc"
@@ -27,7 +28,11 @@ type Server struct {
 
 	handler func(net.Conn)
 
-	l net.Listener
+	l       net.Listener
+	connsMu sync.Mutex
+	conns   map[net.Conn]struct{}
+	wg      sync.WaitGroup
+	closed  bool
 }
 
 type Option func(*Server) *Server
@@ -36,6 +41,7 @@ func New(netType Type, options ...Option) *Server {
 	s := &Server{
 		netType:  netType,
 		bindAddr: "127.0.0.1",
+		conns:    make(map[net.Conn]struct{}),
 	}
 	s.handler = s.handle
 
@@ -78,23 +84,52 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	go func() {
+	s.wg.Go(func() {
 		for {
 			c, err := s.l.Accept()
 			if err != nil {
 				return
 			}
-			go s.handler(c)
+			s.connsMu.Lock()
+			if s.closed {
+				s.connsMu.Unlock()
+				_ = c.Close()
+				return
+			}
+			s.conns[c] = struct{}{}
+			s.connsMu.Unlock()
+
+			s.wg.Go(func() {
+				defer func() {
+					s.connsMu.Lock()
+					delete(s.conns, c)
+					s.connsMu.Unlock()
+				}()
+				s.handler(c)
+			})
 		}
-	}()
+	})
 	return nil
 }
 
 func (s *Server) Close() error {
-	if s.l != nil {
-		return s.l.Close()
+	s.connsMu.Lock()
+	if s.closed {
+		s.connsMu.Unlock()
+		return nil
 	}
-	return nil
+	s.closed = true
+	var err error
+	if s.l != nil {
+		err = s.l.Close()
+	}
+	for c := range s.conns {
+		_ = c.Close()
+	}
+	s.connsMu.Unlock()
+
+	s.wg.Wait()
+	return err
 }
 
 func (s *Server) initListener() (err error) {

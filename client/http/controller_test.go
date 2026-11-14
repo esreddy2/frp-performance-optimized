@@ -634,19 +634,20 @@ func TestGetProxyConfigNotFound(t *testing.T) {
 }
 
 func TestGetVisitorConfigFromManager(t *testing.T) {
+	visitorOrig := &v1.STCPVisitorConfig{
+		VisitorBaseConfig: v1.VisitorBaseConfig{
+			Name:       "my-stcp",
+			Type:       "stcp",
+			ServerName: "server1",
+			SecretKey:  "real-secret-123",
+			BindPort:   9000,
+		},
+	}
 	controller := &Controller{
 		manager: &fakeConfigManager{
 			getVisitorConfigFn: func(name string) (v1.VisitorConfigurer, bool) {
 				if name == "my-stcp" {
-					cfg := &v1.STCPVisitorConfig{
-						VisitorBaseConfig: v1.VisitorBaseConfig{
-							Name:       "my-stcp",
-							Type:       "stcp",
-							ServerName: "server1",
-							BindPort:   9000,
-						},
-					}
-					return cfg, true
+					return visitorOrig, true
 				}
 				return nil, false
 			},
@@ -667,6 +668,52 @@ func TestGetVisitorConfigFromManager(t *testing.T) {
 	}
 	if payload.Name != "my-stcp" || payload.Type != "stcp" || payload.STCP == nil {
 		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	if payload.STCP.SecretKey != "******" {
+		t.Fatalf("expected masked SecretKey '******', got %q", payload.STCP.SecretKey)
+	}
+	if visitorOrig.SecretKey != "real-secret-123" {
+		t.Fatalf("original visitor SecretKey must not be mutated, got %q", visitorOrig.SecretKey)
+	}
+}
+
+//nolint:gosec // test-only credentials
+func TestGetProxyConfigFromManager_MasksCredentials(t *testing.T) {
+	stcpOrig := &v1.STCPProxyConfig{
+		ProxyBaseConfig: v1.ProxyBaseConfig{
+			Name: "secret-stcp",
+			Type: "stcp",
+		},
+		Secretkey: "stcp-super-secret", //nolint:gosec // test-only secret
+	}
+	controller := &Controller{
+		manager: &fakeConfigManager{
+			getProxyConfigFn: func(name string) (v1.ProxyConfigurer, bool) {
+				if name == "secret-stcp" {
+					return stcpOrig, true
+				}
+				return nil, false
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/proxy/secret-stcp/config", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": "secret-stcp"})
+	ctx := httppkg.NewContext(httptest.NewRecorder(), req)
+
+	resp, err := controller.GetProxyConfig(ctx)
+	if err != nil {
+		t.Fatalf("get proxy config: %v", err)
+	}
+	payload, ok := resp.(model.ProxyDefinition)
+	if !ok {
+		t.Fatalf("unexpected response type: %T", resp)
+	}
+	if payload.STCP == nil || payload.STCP.Secretkey != "******" {
+		t.Fatalf("expected masked Secretkey '******', got %#v", payload.STCP)
+	}
+	if stcpOrig.Secretkey != "stcp-super-secret" {
+		t.Fatalf("original proxy Secretkey must not be mutated, got %q", stcpOrig.Secretkey)
 	}
 }
 
