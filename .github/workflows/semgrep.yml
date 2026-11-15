@@ -24,20 +24,31 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run Semgrep
         run: semgrep scan --config auto --sarif --output semgrep.sarif
-      - name: Summarize findings
+      - name: Drop nosemgrep-suppressed results and summarize
         if: always()
+        # Semgrep keeps `// nosemgrep` matches in SARIF with an "accepted"
+        # suppression, but GitHub code scanning still opens alerts for them.
+        # Remove them so in-source suppressions are the single source of truth
+        # and GitHub marks those alerts fixed.
         run: |
           python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           import collections, json, os
           if not os.path.exists("semgrep.sarif"):
               print("## Semgrep\n\nNo SARIF produced (scan failed).")
               raise SystemExit
-          results = [r for run in json.load(open("semgrep.sarif"))["runs"] for r in run.get("results", [])]
-          print(f"## Semgrep: {len(results)} unsuppressed finding(s)\n")
+          sarif = json.load(open("semgrep.sarif"))
+          active, suppressed = [], 0
+          for run in sarif["runs"]:
+              kept = [r for r in run.get("results", []) if not r.get("suppressions")]
+              suppressed += len(run.get("results", [])) - len(kept)
+              run["results"] = kept
+              active += kept
+          json.dump(sarif, open("semgrep.sarif", "w"))
+          print(f"## Semgrep: {len(active)} unsuppressed finding(s), {suppressed} suppressed via nosemgrep\n")
           print("New and fixed alerts are tracked in the Security > Code scanning tab (category `semgrep`).\n")
-          if results:
+          if active:
               print("| Rule | Count |\n|---|---|")
-              for rule, n in collections.Counter(r["ruleId"] for r in results).most_common():
+              for rule, n in collections.Counter(r["ruleId"] for r in active).most_common():
                   print(f"| `{rule}` | {n} |")
           EOF
       - name: Upload SARIF
