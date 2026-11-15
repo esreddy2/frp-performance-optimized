@@ -22,7 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/template"
+	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template (text/template is required for TOML/INI/YAML configuration interpolation, where html/template would corrupt config syntax)
 
 	toml "github.com/pelletier/go-toml/v2"
 	"github.com/samber/lo"
@@ -422,7 +422,7 @@ func LoadClientConfig(path string, strict bool) (
 ) {
 	result, err := LoadClientConfigResult(path, strict)
 	if err != nil {
-		return nil, nil, nil, result != nil && result.IsLegacyFormat, err
+		return nil, nil, nil, false, err
 	}
 
 	proxyCfgs := result.Proxies

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/transport"
 )
 
 type closeTrackingRWC struct {
@@ -507,4 +509,243 @@ func TestHTTPProxyAndUnixDomainSocketPlugins(t *testing.T) {
 	_, err = io.ReadFull(uc1, udsBuf)
 	require.NoError(err)
 	require.Equal("uds-echo", string(udsBuf))
+}
+
+func TestHTTP2HTTPSBackendCAVerification(t *testing.T) {
+	require := require.New(t)
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("backend-ok"))
+	}))
+	defer backend.Close()
+	backendHost := strings.TrimPrefix(backend.URL, "https://")
+
+	dir := t.TempDir()
+	validCAFile := filepath.Join(dir, "valid-ca.pem")
+	validPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: backend.Certificate().Raw})
+	require.NoError(os.WriteFile(validCAFile, validPEM, 0o600))
+
+	wrongCAFile := filepath.Join(dir, "wrong-ca.pem")
+	wrongCfg, err := transport.NewServerTLSConfig("", "", "")
+	require.NoError(err)
+	wrongPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: wrongCfg.Certificates[0].Certificate[0]})
+	require.NoError(os.WriteFile(wrongCAFile, wrongPEM, 0o600))
+
+	// Case 1: Option unset (TrustedCaFile == "") -> Default behavior (InsecureSkipVerify: true) works
+	t.Run("default_unset_ca_succeeds", func(t *testing.T) {
+		p, err := Create(v1.PluginHTTP2HTTPS, PluginContext{Name: "p-h2s-default"}, &v1.HTTP2HTTPSPluginOptions{
+			LocalAddr:         backendHost,
+			HostHeaderRewrite: "example.com",
+		})
+		require.NoError(err)
+		defer p.Close()
+
+		c1, c2 := net.Pipe()
+		defer c1.Close()
+		defer c2.Close()
+		go p.Handle(context.Background(), &ConnectionInfo{Conn: c2, UnderlyingConn: c2})
+
+		_ = c1.SetDeadline(time.Now().Add(3 * time.Second))
+		_, err = io.WriteString(c1, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+		require.NoError(err)
+
+		resp, err := http.ReadResponse(bufio.NewReader(c1), nil)
+		require.NoError(err)
+		defer resp.Body.Close()
+		require.Equal(http.StatusOK, resp.StatusCode)
+	})
+
+	// Case 2: Right CA -> Verification succeeds (200 OK)
+	t.Run("valid_ca_succeeds", func(t *testing.T) {
+		p, err := Create(v1.PluginHTTP2HTTPS, PluginContext{Name: "p-h2s-valid"}, &v1.HTTP2HTTPSPluginOptions{
+			LocalAddr:         backendHost,
+			HostHeaderRewrite: "example.com",
+			TrustedCaFile:     validCAFile,
+		})
+		require.NoError(err)
+		defer p.Close()
+
+		c1, c2 := net.Pipe()
+		defer c1.Close()
+		defer c2.Close()
+		go p.Handle(context.Background(), &ConnectionInfo{Conn: c2, UnderlyingConn: c2})
+
+		_ = c1.SetDeadline(time.Now().Add(3 * time.Second))
+		_, err = io.WriteString(c1, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+		require.NoError(err)
+
+		resp, err := http.ReadResponse(bufio.NewReader(c1), nil)
+		require.NoError(err)
+		defer resp.Body.Close()
+		require.Equal(http.StatusOK, resp.StatusCode)
+	})
+
+	// Case 3: Wrong CA -> Verification fails (502 Bad Gateway)
+	t.Run("wrong_ca_fails", func(t *testing.T) {
+		p, err := Create(v1.PluginHTTP2HTTPS, PluginContext{Name: "p-h2s-wrong"}, &v1.HTTP2HTTPSPluginOptions{
+			LocalAddr:         backendHost,
+			HostHeaderRewrite: "example.com",
+			TrustedCaFile:     wrongCAFile,
+		})
+		require.NoError(err)
+		defer p.Close()
+
+		c1, c2 := net.Pipe()
+		defer c1.Close()
+		defer c2.Close()
+		go p.Handle(context.Background(), &ConnectionInfo{Conn: c2, UnderlyingConn: c2})
+
+		_ = c1.SetDeadline(time.Now().Add(3 * time.Second))
+		_, err = io.WriteString(c1, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+		require.NoError(err)
+
+		resp, err := http.ReadResponse(bufio.NewReader(c1), nil)
+		require.NoError(err)
+		defer resp.Body.Close()
+		require.Equal(http.StatusBadGateway, resp.StatusCode)
+	})
+
+	// Case 4: Non-existent CA file -> Creation fails
+	t.Run("nonexistent_ca_file_fails", func(t *testing.T) {
+		_, err := Create(v1.PluginHTTP2HTTPS, PluginContext{Name: "p-h2s-missing"}, &v1.HTTP2HTTPSPluginOptions{
+			LocalAddr:     backendHost,
+			TrustedCaFile: filepath.Join(dir, "nonexistent.pem"),
+		})
+		require.Error(err)
+		require.Contains(err.Error(), "read trusted CA file error")
+	})
+
+	// Case 5: Invalid PEM file -> Creation fails
+	t.Run("invalid_pem_file_fails", func(t *testing.T) {
+		invalidPEMFile := filepath.Join(dir, "invalid.pem")
+		require.NoError(os.WriteFile(invalidPEMFile, []byte("not a certificate"), 0o600))
+		_, err := Create(v1.PluginHTTP2HTTPS, PluginContext{Name: "p-h2s-invalid"}, &v1.HTTP2HTTPSPluginOptions{
+			LocalAddr:     backendHost,
+			TrustedCaFile: invalidPEMFile,
+		})
+		require.Error(err)
+		require.Contains(err.Error(), "failed to parse CA certificate")
+	})
+}
+
+func TestHTTPS2HTTPSBackendCAVerification(t *testing.T) {
+	require := require.New(t)
+
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("https2https-backend-ok"))
+	}))
+	defer backend.Close()
+	backendHost := strings.TrimPrefix(backend.URL, "https://")
+
+	dir := t.TempDir()
+	validCAFile := filepath.Join(dir, "valid-ca.pem")
+	validPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: backend.Certificate().Raw})
+	require.NoError(os.WriteFile(validCAFile, validPEM, 0o600))
+
+	wrongCAFile := filepath.Join(dir, "wrong-ca.pem")
+	wrongCfg, err := transport.NewServerTLSConfig("", "", "")
+	require.NoError(err)
+	wrongPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: wrongCfg.Certificates[0].Certificate[0]})
+	require.NoError(os.WriteFile(wrongCAFile, wrongPEM, 0o600))
+
+	// Case 1: Option unset (TrustedCaFile == "") -> Default behavior (InsecureSkipVerify: true) works
+	t.Run("default_unset_ca_succeeds", func(t *testing.T) {
+		p, err := Create(v1.PluginHTTPS2HTTPS, PluginContext{Name: "p-s2s-default"}, &v1.HTTPS2HTTPSPluginOptions{
+			LocalAddr:         backendHost,
+			HostHeaderRewrite: "example.com",
+		})
+		require.NoError(err)
+		defer p.Close()
+
+		c1, c2 := net.Pipe()
+		defer c1.Close()
+		defer c2.Close()
+		go p.Handle(context.Background(), &ConnectionInfo{Conn: c2, UnderlyingConn: c2})
+
+		tlsClient := tls.Client(c1, &tls.Config{InsecureSkipVerify: true})
+		_ = tlsClient.SetDeadline(time.Now().Add(3 * time.Second))
+		_, err = io.WriteString(tlsClient, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+		require.NoError(err)
+
+		resp, err := http.ReadResponse(bufio.NewReader(tlsClient), nil)
+		require.NoError(err)
+		defer resp.Body.Close()
+		require.Equal(http.StatusOK, resp.StatusCode)
+	})
+
+	// Case 2: Right CA -> Verification succeeds (200 OK)
+	t.Run("valid_ca_succeeds", func(t *testing.T) {
+		p, err := Create(v1.PluginHTTPS2HTTPS, PluginContext{Name: "p-s2s-valid"}, &v1.HTTPS2HTTPSPluginOptions{
+			LocalAddr:         backendHost,
+			HostHeaderRewrite: "example.com",
+			TrustedCaFile:     validCAFile,
+		})
+		require.NoError(err)
+		defer p.Close()
+
+		c1, c2 := net.Pipe()
+		defer c1.Close()
+		defer c2.Close()
+		go p.Handle(context.Background(), &ConnectionInfo{Conn: c2, UnderlyingConn: c2})
+
+		tlsClient := tls.Client(c1, &tls.Config{InsecureSkipVerify: true})
+		_ = tlsClient.SetDeadline(time.Now().Add(3 * time.Second))
+		_, err = io.WriteString(tlsClient, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+		require.NoError(err)
+
+		resp, err := http.ReadResponse(bufio.NewReader(tlsClient), nil)
+		require.NoError(err)
+		defer resp.Body.Close()
+		require.Equal(http.StatusOK, resp.StatusCode)
+	})
+
+	// Case 3: Wrong CA -> Verification fails (502 Bad Gateway)
+	t.Run("wrong_ca_fails", func(t *testing.T) {
+		p, err := Create(v1.PluginHTTPS2HTTPS, PluginContext{Name: "p-s2s-wrong"}, &v1.HTTPS2HTTPSPluginOptions{
+			LocalAddr:         backendHost,
+			HostHeaderRewrite: "example.com",
+			TrustedCaFile:     wrongCAFile,
+		})
+		require.NoError(err)
+		defer p.Close()
+
+		c1, c2 := net.Pipe()
+		defer c1.Close()
+		defer c2.Close()
+		go p.Handle(context.Background(), &ConnectionInfo{Conn: c2, UnderlyingConn: c2})
+
+		tlsClient := tls.Client(c1, &tls.Config{InsecureSkipVerify: true})
+		_ = tlsClient.SetDeadline(time.Now().Add(3 * time.Second))
+		_, err = io.WriteString(tlsClient, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+		require.NoError(err)
+
+		resp, err := http.ReadResponse(bufio.NewReader(tlsClient), nil)
+		require.NoError(err)
+		defer resp.Body.Close()
+		require.Equal(http.StatusBadGateway, resp.StatusCode)
+	})
+
+	// Case 4: Non-existent CA file -> Creation fails
+	t.Run("nonexistent_ca_file_fails", func(t *testing.T) {
+		_, err := Create(v1.PluginHTTPS2HTTPS, PluginContext{Name: "p-s2s-missing"}, &v1.HTTPS2HTTPSPluginOptions{
+			LocalAddr:     backendHost,
+			TrustedCaFile: filepath.Join(dir, "nonexistent.pem"),
+		})
+		require.Error(err)
+		require.Contains(err.Error(), "read trusted CA file error")
+	})
+
+	// Case 5: Invalid PEM file -> Creation fails
+	t.Run("invalid_pem_file_fails", func(t *testing.T) {
+		invalidPEMFile := filepath.Join(dir, "invalid.pem")
+		require.NoError(os.WriteFile(invalidPEMFile, []byte("not a certificate"), 0o600))
+		_, err := Create(v1.PluginHTTPS2HTTPS, PluginContext{Name: "p-s2s-invalid"}, &v1.HTTPS2HTTPSPluginOptions{
+			LocalAddr:     backendHost,
+			TrustedCaFile: invalidPEMFile,
+		})
+		require.Error(err)
+		require.Contains(err.Error(), "failed to parse CA certificate")
+	})
 }

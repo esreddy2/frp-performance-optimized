@@ -211,6 +211,8 @@ func (e *ExecSource) Resolve(ctx context.Context) (string, error) {
 		defer cancel()
 	}
 
+	// Dynamic exec command is an intentional feature to source configuration/tokens, guarded by security policy, timeout, and execution limits.
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.CommandContext(ctx, e.Command, e.Args...)
 	cmd.WaitDelay = execWaitDelay
 	if len(e.Env) != 0 {

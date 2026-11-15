@@ -43,6 +43,7 @@ func createOIDCHTTPClient(trustedCAFile string, insecureSkipVerify bool, proxyUR
 	// Configure TLS settings
 	if trustedCAFile != "" || insecureSkipVerify {
 		tlsConfig := &tls.Config{
+			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: insecureSkipVerify,
 		}
 

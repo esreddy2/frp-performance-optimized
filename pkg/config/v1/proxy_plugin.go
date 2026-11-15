@@ -88,6 +88,10 @@ type HTTP2HTTPSPluginOptions struct {
 	LocalAddr         string           `json:"localAddr,omitempty"`
 	HostHeaderRewrite string           `json:"hostHeaderRewrite,omitempty"`
 	RequestHeaders    HeaderOperations `json:"requestHeaders,omitempty"`
+	// TrustedCaFile specifies a path to a PEM-encoded CA certificate file used to
+	// verify the backend HTTPS server's certificate. If empty, certificate
+	// verification is skipped (the default behavior).
+	TrustedCaFile string `json:"trustedCaFile,omitempty"`
 }
 
 func (o *HTTP2HTTPSPluginOptions) Complete() {}
@@ -149,6 +153,10 @@ type HTTPS2HTTPSPluginOptions struct {
 	EnableHTTP2       *bool            `json:"enableHTTP2,omitempty"`
 	CrtPath           string           `json:"crtPath,omitempty"`
 	KeyPath           string           `json:"keyPath,omitempty"`
+	// TrustedCaFile specifies a path to a PEM-encoded CA certificate file used to
+	// verify the backend HTTPS server's certificate. If empty, certificate
+	// verification is skipped (the default behavior).
+	TrustedCaFile string `json:"trustedCaFile,omitempty"`
 }
 
 func (o *HTTPS2HTTPSPluginOptions) Complete() {

@@ -15,7 +15,7 @@
 package wait
 
 import (
-	"math/rand/v2"
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used (non-cryptographic timing jitter in retry backoff; cryptographic tokens use crypto/rand)
 	"time"
 
 	"k8s.io/utils/clock"

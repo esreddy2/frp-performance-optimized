@@ -55,9 +55,12 @@ func New(handler http.Handler, crtPath, keyPath string, enableHTTP2 *bool) (*Ser
 		tlsConfig, err = transport.NewServerTLSConfig(crtPath, keyPath, "")
 	} else {
 		err = server.Reload()
-		tlsConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return server.state.Load().cert, nil
-		}}
+		tlsConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				return server.state.Load().cert, nil
+			},
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("gen TLS config error: %v", err)

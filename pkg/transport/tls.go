@@ -26,6 +26,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/fatedier/frp/pkg/util/log"
 )
 
 func newCustomTLSKeyPair(certfile, keyfile string) (*tls.Certificate, error) {
@@ -164,6 +166,8 @@ func newClientTLSConfig(
 		return nil, fmt.Errorf("both tls cert and key must be provided together")
 	}
 
+	// Fallback for backward compatibility when no CA is configured skips verification (R2).
+	// nosemgrep: problem-based-packs.insecure-transport.go-stdlib.bypass-tls-verification.bypass-tls-verification
 	base := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 	}
@@ -204,8 +208,11 @@ func newClientTLSConfig(
 	case useSystemCa:
 		base.InsecureSkipVerify = false
 	default:
-		// lgtm[go/disabled-certificate-check]
+		// Fallback for backward compatibility when no CA is configured (R2).
+		// nosemgrep: problem-based-packs.insecure-transport.go-stdlib.bypass-tls-verification.bypass-tls-verification
 		base.InsecureSkipVerify = true
+		log.Warnf("TLS certificate verification is disabled because no CA certificate is configured. " +
+			"The connection to frps is vulnerable to man-in-the-middle attacks.")
 	}
 
 	return base, nil

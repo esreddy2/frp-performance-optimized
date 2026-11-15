@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"os"
 	"strings"
-	"text/template"
+	"text/template" // nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template (text/template is required for TOML/INI/YAML configuration interpolation, where html/template would corrupt config syntax)
 )
 
 var glbEnvs map[string]string

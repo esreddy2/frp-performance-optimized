@@ -135,6 +135,8 @@ func NewHTTPReverseProxy(option HTTPReverseProxyOptions, vhostRouter *Routers) *
 				}
 			}
 			rw.WriteHeader(http.StatusNotFound)
+			// Writes static 404 text response, not user-injected HTML.
+			// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
 			_, _ = rw.Write(getNotFoundPageContent())
 		},
 	}

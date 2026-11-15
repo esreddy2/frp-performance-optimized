@@ -62,6 +62,8 @@ func (r *Registry) Handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", ContentType)
+		// Writes Prometheus exposition text/plain format, not user-injected HTML.
+		// nosemgrep: go.lang.security.audit.xss.no-io-writestring-to-responsewriter.no-io-writestring-to-responsewriter
 		_, _ = io.WriteString(w, b.String())
 	})
 }

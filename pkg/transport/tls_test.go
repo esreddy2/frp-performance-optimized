@@ -15,6 +15,7 @@
 package transport
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -29,7 +30,10 @@ import (
 	"testing"
 	"time"
 
+	goliblog "github.com/fatedier/golib/log"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fatedier/frp/pkg/util/log"
 )
 
 func newSelfSignedCert(t *testing.T, name string) (tls.Certificate, []byte) {
@@ -253,4 +257,40 @@ func TestClientTLSConfigHandshake(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClientTLSConfigWarningAndSuccessWhenNoCA(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Logger
+	log.Logger = goliblog.New(goliblog.WithOutput(&output), goliblog.WithLevel(goliblog.WarnLevel))
+	t.Cleanup(func() { log.Logger = previous })
+
+	serverCert, _ := newSelfSignedCert(t, "localhost")
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{serverCert},
+	})
+	require.NoError(t, err)
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+			_ = conn.(*tls.Conn).Handshake()
+			_ = conn.Close()
+		}
+	}()
+
+	cfg, err := NewClientTLSConfigWithSystemCA("", "", "", "localhost", false)
+	require.NoError(t, err)
+	require.True(t, cfg.InsecureSkipVerify)
+	require.Contains(t, output.String(), "TLS certificate verification is disabled because no CA certificate is configured")
+
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", ln.Addr().String(), cfg)
+	require.NoError(t, err)
+	_ = conn.Close()
 }

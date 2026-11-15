@@ -82,6 +82,7 @@ func newServer(bindAddr string, port int, user, password string, tlsConfig *v1.T
 			return nil, err
 		}
 		s.tlsCfg = &tls.Config{
+			MinVersion:   tls.VersionTLS12,
 			Certificates: []tls.Certificate{cert},
 		}
 	}

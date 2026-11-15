@@ -15,6 +15,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -33,10 +34,12 @@ import (
 	"testing"
 	"time"
 
+	goliblog "github.com/fatedier/golib/log"
 	quic "github.com/quic-go/quic-go"
 	"github.com/stretchr/testify/require"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	frplog "github.com/fatedier/frp/pkg/util/log"
 )
 
 // transport.tls.useSystemCa must actually reach the TLS configuration that the
@@ -294,4 +297,32 @@ func TestClientTLSConfigMaterial(t *testing.T) {
 			require.False(t, tlsConfig.InsecureSkipVerify, "the server certificate must be verified")
 		})
 	}
+}
+
+func TestConnectorTLSWarningLoggedWhenNoCAConfigured(t *testing.T) {
+	var output bytes.Buffer
+	previous := frplog.Logger
+	frplog.Logger = goliblog.New(goliblog.WithOutput(&output), goliblog.WithLevel(goliblog.WarnLevel))
+	t.Cleanup(func() { frplog.Logger = previous })
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	host, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	require.NoError(t, err)
+
+	cfg := &v1.ClientCommonConfig{ServerAddr: host}
+	cfg.ServerPort, _ = strconv.Atoi(port)
+	require.NoError(t, cfg.Complete())
+	cfg.Transport.TLS.Enable = new(true)
+	cfg.Transport.TLS.UseSystemCa = false
+	cfg.Transport.TLS.TrustedCaFile = ""
+
+	conn, err := (&defaultConnectorImpl{ctx: context.Background(), cfg: cfg}).realConnect()
+	require.NoError(t, err, "connection must succeed without a CA configured")
+	require.NotNil(t, conn)
+	_ = conn.Close()
+
+	require.Contains(t, output.String(), "TLS certificate verification is disabled because no CA certificate is configured")
 }

@@ -18,8 +18,12 @@ package client
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
+	"os"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 )
@@ -41,10 +45,39 @@ func NewHTTPS2HTTPSPlugin(_ PluginContext, options v1.ClientPluginOptions) (Plug
 		opts: opts,
 	}
 
+	var tlsConfig *tls.Config
+	if opts.TrustedCaFile != "" {
+		caCert, err := os.ReadFile(opts.TrustedCaFile)
+		if err != nil {
+			return nil, fmt.Errorf("read trusted CA file error: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate from file %q", opts.TrustedCaFile)
+		}
+		tlsConfig = &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			RootCAs:            caPool,
+			InsecureSkipVerify: false,
+		}
+		if opts.HostHeaderRewrite != "" {
+			host, _, err := net.SplitHostPort(opts.HostHeaderRewrite)
+			if err != nil {
+				host = opts.HostHeaderRewrite
+			}
+			tlsConfig.ServerName = host
+		}
+	} else {
+		// By default bridges to local HTTPS backend without verification for backward compatibility (R3).
+		// nosemgrep: problem-based-packs.insecure-transport.go-stdlib.bypass-tls-verification.bypass-tls-verification
+		tlsConfig = &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true,
+		}
+	}
+
 	tr := &http.Transport{
-		// lgtm[go/disabled-certificate-check] (AUD-043: intentional self-signed local backend)
-		// InsecureSkipVerify is intentional: the HTTPS2HTTPS plugin proxies to a local self-signed HTTPS backend.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: tlsConfig,
 	}
 
 	rp := newHTTPBridgeReverseProxy(

@@ -62,8 +62,12 @@ func MakeHTTPHandlerFunc(handler APIHandler) http.HandlerFunc {
 
 		switch v := res.(type) {
 		case []byte:
+			// Writes raw API responses, not user-injected HTML.
+			// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
 			_, _ = w.Write(v)
 		case string:
+			// Writes raw API responses, not user-injected HTML.
+			// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
 			_, _ = w.Write([]byte(v))
 		default:
 			w.Header().Set("Content-Type", "application/json")

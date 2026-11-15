@@ -20,7 +20,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
-	mathrand "math/rand/v2"
+	mathrand "math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used (non-cryptographic timing jitter in RandomSleep; cryptographic tokens use crypto/rand)
 	"net"
 	"strconv"
 	"strings"
@@ -48,9 +48,9 @@ func RandIDWithLen(idLen int) (id string, err error) {
 }
 
 func GetAuthKey(token string, timestamp int64) (key string) {
+	// MD5 in GetAuthKey is required for upstream frp wire-protocol compatibility (R4).
+	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-md5
 	md5Ctx := md5.New()
-	// MD5 is used to derive a frp challenge-response auth token, not for password storage; changing it would break protocol compatibility between frp peers.
-	// lgtm[go/weak-sensitive-data-hashing]
 	md5Ctx.Write([]byte(token))
 	md5Ctx.Write([]byte(strconv.FormatInt(timestamp, 10)))
 	data := md5Ctx.Sum(nil)

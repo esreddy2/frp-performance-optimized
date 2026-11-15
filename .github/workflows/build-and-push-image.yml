@@ -24,27 +24,29 @@ jobs:
           fetch-depth: '0'
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # get image tag name
       - name: Get Image Tag Name
+        env:
+          IMAGE_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ x${{ github.event.inputs.tag }} == x"" ]; then
+          if [ -z "$IMAGE_TAG" ]; then
             echo "TAG_NAME=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
           else
-            echo "TAG_NAME=${{ github.event.inputs.tag }}" >> $GITHUB_ENV
+            echo "TAG_NAME=$IMAGE_TAG" >> $GITHUB_ENV
           fi
       - name: Login to DockerHub
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
       - name: Login to the GPR
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -61,7 +63,7 @@ jobs:
           echo "TAG_FRPS_GPR=ghcr.io/esreddy2/frps:${{ env.TAG_NAME }}" >> $GITHUB_ENV
 
       - name: Build and push frpc
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./dockerfiles/Dockerfile-for-frpc
@@ -72,7 +74,7 @@ jobs:
             ${{ env.TAG_FRPC_GPR }}
 
       - name: Build and push frps
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./dockerfiles/Dockerfile-for-frps

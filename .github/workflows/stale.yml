@@ -18,7 +18,7 @@ jobs:
       pull-requests: write  # for actions/stale to close stale PRs
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/stale@v11
+    - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
       with:
         stale-issue-message: 'Issues go stale after 14d of inactivity. Stale issues rot after an additional 3d of inactivity and eventually close.'
         stale-pr-message: "PRs go stale after 14d of inactivity. Stale PRs rot after an additional 3d of inactivity and eventually close."
