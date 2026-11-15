@@ -48,7 +48,7 @@ func RandIDWithLen(idLen int) (id string, err error) {
 }
 
 func GetAuthKey(token string, timestamp int64) (key string) {
-	// MD5 in GetAuthKey is required for upstream frp wire-protocol compatibility (R4).
+	// MD5 is used to derive a frp challenge-response auth token, not for password storage; changing it would break protocol compatibility between frp peers.
 	// nosemgrep: go.lang.security.audit.crypto.use_of_weak_crypto.use-of-md5
 	md5Ctx := md5.New()
 	md5Ctx.Write([]byte(token))

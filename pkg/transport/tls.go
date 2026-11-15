@@ -166,7 +166,9 @@ func newClientTLSConfig(
 		return nil, fmt.Errorf("both tls cert and key must be provided together")
 	}
 
-	// Fallback for backward compatibility when no CA is configured skips verification (R2).
+	// Semgrep's bypass-tls-verification match spans from this literal to the
+	// InsecureSkipVerify fallback below (no CA configured, kept for backward
+	// compatibility; a warning is logged at runtime), so the suppression must sit here.
 	// nosemgrep: problem-based-packs.insecure-transport.go-stdlib.bypass-tls-verification.bypass-tls-verification
 	base := &tls.Config{
 		MinVersion: tls.VersionTLS12,

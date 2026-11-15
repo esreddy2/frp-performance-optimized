@@ -24,6 +24,22 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run Semgrep
         run: semgrep scan --config auto --sarif --output semgrep.sarif
+      - name: Summarize findings
+        if: always()
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import collections, json, os
+          if not os.path.exists("semgrep.sarif"):
+              print("## Semgrep\n\nNo SARIF produced (scan failed).")
+              raise SystemExit
+          results = [r for run in json.load(open("semgrep.sarif"))["runs"] for r in run.get("results", [])]
+          print(f"## Semgrep: {len(results)} unsuppressed finding(s)\n")
+          print("New and fixed alerts are tracked in the Security > Code scanning tab (category `semgrep`).\n")
+          if results:
+              print("| Rule | Count |\n|---|---|")
+              for rule, n in collections.Counter(r["ruleId"] for r in results).most_common():
+                  print(f"| `{rule}` | {n} |")
+          EOF
       - name: Upload SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
